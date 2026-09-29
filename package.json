@@ -1,0 +1,16 @@
+{
+  "name": "scenefork",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @scenefork/web",
+    "build": "npm run build --workspace @scenefork/web",
+    "typecheck": "npm run typecheck --workspace @scenefork/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
