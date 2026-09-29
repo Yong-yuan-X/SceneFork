@@ -1,4 +1,20 @@
-import type { StoryChoice, StoryTurn } from '../types'
+import type { StoryChoice, StoryTurn, VideoTask } from '../types'
+
+export function createIdleVideoTask(): VideoTask {
+  return {
+    id: null,
+    version: 1,
+    taskId: null,
+    providerStatus: null,
+    status: 'idle',
+    startedAt: null,
+    updatedAt: null,
+    outcome: 'success',
+    videoUrl: null,
+    mediaType: null,
+    error: null,
+  }
+}
 
 const openingChoices: StoryChoice[] = [
   {
@@ -27,6 +43,8 @@ export function createOpeningTurn(idea: string): StoryTurn {
   const cleanIdea = idea.trim()
   return {
     id: `turn-${Date.now()}`,
+    storyId: null,
+    parentTurnId: null,
     title: '雾海尽头的城堡',
     storyText: `暮色沉入群山，${cleanIdea}。你在雾气散开的瞬间看见一座悬于峭壁之上的古堡。桥上的灯依次亮起，像是在回应某个迟到了很多年的约定。`,
     summary: '主角抵达雾谷，发现远处古堡发出的神秘召唤。',
@@ -35,6 +53,8 @@ export function createOpeningTurn(idea: string): StoryTurn {
     choices: openingChoices,
     duration: 8,
     imageVariant: 0,
+    createdAt: new Date().toISOString(),
+    videoTask: createIdleVideoTask(),
   }
 }
 
@@ -55,6 +75,8 @@ export function createContinuationTurn(direction: string, index: number): StoryT
 
   return {
     id: `turn-${Date.now()}`,
+    storyId: null,
+    parentTurnId: null,
     title: picked.title,
     storyText: picked.storyText,
     summary: picked.summary,
@@ -66,5 +88,7 @@ export function createContinuationTurn(direction: string, index: number): StoryT
     })),
     duration: 8,
     imageVariant: (index % 3) + 1,
+    createdAt: new Date().toISOString(),
+    videoTask: createIdleVideoTask(),
   }
 }

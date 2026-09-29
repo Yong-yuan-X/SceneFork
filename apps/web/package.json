@@ -6,14 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "typecheck": "vue-tsc -b"
+    "typecheck": "vue-tsc -b",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@scenefork/shared": "0.1.0",
     "vue": "^3.5.22"
   },
   "devDependencies": {
     "@types/node": "^24.7.2",
     "@vitejs/plugin-vue": "^6.0.1",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^7.1.7",
     "vue-tsc": "^3.1.0"

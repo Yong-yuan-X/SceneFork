@@ -1,17 +1,32 @@
 <script setup lang="ts">
+import type { StoryResponse, VideoTaskResponse } from '@scenefork/shared'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { publicConfig } from './config'
-import { createContinuationTurn, createOpeningTurn } from './mocks/story'
+import {
+  createContinuationTurn,
+  createIdleVideoTask,
+  createOpeningTurn,
+} from './mocks/story'
+import { apiClient, ApiError } from './services/apiClient'
+import {
+  isElementFullscreen,
+  readMediaVolume,
+  setMediaVolume,
+  toggleElementFullscreen,
+  toggleMediaMute,
+} from './services/mediaControls'
 import { mockContinueStory, mockGenerateStory, mockTaskStatus } from './services/mockStoryService'
 import type {
   ActivityItem,
   ChatMessage,
   PersistedWorkspace,
   StoryChoice,
+  StoryTurn,
   VideoStatus,
+  VideoTask,
 } from './types'
 
-const STORAGE_KEY = 'scenefork.phase-a.workspace.v1'
+const STORAGE_KEY = 'scenefork.workspace.v2'
 const ACTIVE_VIDEO_STATES: VideoStatus[] = ['submitting', 'queued', 'running', 'saving']
 
 const nowTime = () =>
@@ -20,11 +35,13 @@ const nowTime = () =>
     minute: '2-digit',
     hour12: false,
   }).format(new Date())
-
 const id = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`
 
 function emptyWorkspace(): PersistedWorkspace {
   return {
+    storyId: null,
+    currentTurnId: null,
+    providerMode: 'local',
     phase: 'empty',
     idea: '',
     activeTurnId: null,
@@ -37,19 +54,11 @@ function emptyWorkspace(): PersistedWorkspace {
         time: nowTime(),
       },
     ],
-    videoTask: {
-      taskId: null,
-      status: 'idle',
-      startedAt: null,
-      updatedAt: null,
-      outcome: 'success',
-      error: null,
-    },
     activity: [
       {
         id: id(),
-        label: 'Mock 工作区已就绪',
-        detail: '尚未连接真实模型 API',
+        label: '工作区已就绪',
+        detail: '正在确认后端 Provider 模式',
         time: nowTime(),
         tone: 'neutral',
       },
@@ -63,7 +72,14 @@ function loadWorkspace(): PersistedWorkspace {
     const stored = window.localStorage.getItem(STORAGE_KEY)
     if (!stored) return emptyWorkspace()
     const parsed = JSON.parse(stored) as PersistedWorkspace
-    if (!parsed || !Array.isArray(parsed.turns) || !parsed.videoTask) return emptyWorkspace()
+    if (
+      !parsed ||
+      !Array.isArray(parsed.turns) ||
+      !parsed.turns.every((turn) => turn.videoTask) ||
+      !['local', 'mock', 'real'].includes(parsed.providerMode)
+    ) {
+      return emptyWorkspace()
+    }
     return parsed
   } catch {
     return emptyWorkspace()
@@ -82,16 +98,36 @@ const playhead = ref(0)
 const nowTick = ref(Date.now())
 const restoredNotice = ref(false)
 const storyScroll = ref<HTMLElement | null>(null)
+const videoStage = ref<HTMLElement | null>(null)
+const videoElement = ref<HTMLVideoElement | null>(null)
+const volumePercent = ref(100)
+const lastAudibleVolumePercent = ref(100)
+const isMuted = ref(false)
+const isFullscreen = ref(false)
+const backendAvailable = ref(false)
+const pollingBackend = ref(false)
+let lastBackendPollAt = 0
 
 const activeTurn = computed(() =>
   state.turns.find((turn) => turn.id === state.activeTurnId) ?? state.turns.at(-1) ?? null,
 )
-const isVideoBusy = computed(() => ACTIVE_VIDEO_STATES.includes(state.videoTask.status))
-const choicesEnabled = computed(() => state.videoTask.status === 'succeeded')
+const activeVideoTask = computed(() => activeTurn.value?.videoTask ?? createIdleVideoTask())
+const isVideoBusy = computed(() => ACTIVE_VIDEO_STATES.includes(activeVideoTask.value.status))
+const isCurrentTurn = computed(() => activeTurn.value?.id === state.currentTurnId)
+const choicesEnabled = computed(
+  () => isCurrentTurn.value && activeVideoTask.value.status === 'succeeded',
+)
 const canSend = computed(() => draft.value.trim().length >= 3 && state.phase !== 'story-generating')
+const isMockMode = computed(() => state.providerMode !== 'real')
+const connectionLabel = computed(() => {
+  if (state.providerMode === 'real') return '服务端 · 真实 API 模式'
+  if (state.providerMode === 'mock') return '服务端 Mock · SQLite 持久化'
+  return backendAvailable.value ? '本地 Mock' : '本地 Mock · 后端未连接'
+})
+const previewLabel = computed(() => (isMockMode.value ? 'MOCK PREVIEW' : 'GENERATED VIDEO'))
 const elapsedSeconds = computed(() => {
-  if (!state.videoTask.startedAt) return 0
-  return Math.max(0, Math.floor((nowTick.value - state.videoTask.startedAt) / 1000))
+  if (!activeVideoTask.value.startedAt) return 0
+  return Math.max(0, Math.floor((nowTick.value - activeVideoTask.value.startedAt) / 1000))
 })
 const videoStatusLabel = computed(() => {
   const labels: Record<VideoStatus, string> = {
@@ -100,31 +136,46 @@ const videoStatusLabel = computed(() => {
     queued: '已进入渲染队列',
     running: '正在生成视频',
     saving: '正在保存结果',
-    succeeded: 'Mock 视频已就绪',
+    succeeded: isMockMode.value ? 'Mock 视频已就绪' : '视频已就绪',
     failed: '生成失败',
     submission_unknown: '提交结果待确认',
   }
-  return labels[state.videoTask.status]
+  return labels[activeVideoTask.value.status]
 })
 const primaryInputPlaceholder = computed(() => {
   if (state.phase === 'empty') return '输入你的故事创意…'
+  if (!isCurrentTurn.value) return '返回当前片段后可继续故事…'
   if (!choicesEnabled.value) return '视频完成后可以续写故事…'
   return '或者自由描述故事的下一步…'
 })
-const formattedPlayhead = computed(() => `0:${String(playhead.value).padStart(2, '0')}`)
+const formattedPlayhead = computed(() => `0:${String(Math.floor(playhead.value)).padStart(2, '0')}`)
+const activeMediaUrl = computed(() => {
+  const url = activeVideoTask.value.videoUrl
+  if (!url) return null
+  return new URL(url, `${publicConfig.apiBaseUrl}/`).toString()
+})
+const hasPlayableVideo = computed(
+  () => Boolean(activeMediaUrl.value && activeVideoTask.value.mediaType?.startsWith('video/')),
+)
+const hasImagePreview = computed(
+  () => Boolean(activeMediaUrl.value && activeVideoTask.value.mediaType?.startsWith('image/')),
+)
+const volumeButtonLabel = computed(() =>
+  isMuted.value
+    ? `取消静音，当前音量 ${volumePercent.value}%`
+    : `静音，当前音量 ${volumePercent.value}%`,
+)
 
 let taskTimer: number | undefined
 let playbackTimer: number | undefined
 let noticeTimer: number | undefined
 
-watch(
-  state,
-  (value) => window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value)),
-  { deep: true },
-)
+watch(state, (value) => window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value)), {
+  deep: true,
+})
 
 watch(
-  () => state.videoTask.status,
+  () => activeVideoTask.value.status,
   (status) => {
     if (status !== 'succeeded') {
       isPlaying.value = false
@@ -140,13 +191,57 @@ function pushMessage(sender: ChatMessage['sender'], body: string) {
   })
 }
 
-function pushActivity(
-  label: string,
-  detail: string,
-  tone: ActivityItem['tone'] = 'neutral',
-) {
+function pushActivity(label: string, detail: string, tone: ActivityItem['tone'] = 'neutral') {
   state.activity.unshift({ id: id(), label, detail, time: nowTime(), tone })
   state.activity = state.activity.slice(0, 16)
+}
+
+function mapVideoTask(video: VideoTaskResponse): VideoTask {
+  return {
+    id: video.id,
+    version: video.version,
+    taskId: video.task_id,
+    providerStatus: video.provider_status,
+    status: video.status,
+    startedAt: video.created_at ? Date.parse(video.created_at) : null,
+    updatedAt: video.updated_at ? Date.parse(video.updated_at) : null,
+    outcome: 'success',
+    videoUrl: video.video_url,
+    mediaType: video.media_type,
+    error: video.error,
+  }
+}
+
+function hydrateStory(story: StoryResponse, focusCurrent = true) {
+  const previousActiveId = state.activeTurnId
+  state.storyId = story.id
+  state.currentTurnId = story.current_turn_id
+  state.idea = story.original_idea
+  state.providerMode = story.provider_mode
+  state.turns = story.turns.map((turn, index): StoryTurn => ({
+    id: turn.id,
+    storyId: turn.story_id,
+    parentTurnId: turn.parent_turn_id,
+    title: turn.title,
+    storyText: turn.story_text,
+    summary: turn.summary,
+    videoPrompt: turn.video_prompt,
+    choices: turn.choices.map((choice) => ({
+      id: choice.id,
+      label: choice.label,
+      direction: choice.direction,
+    })),
+    duration: turn.video.duration,
+    imageVariant: index % 4,
+    createdAt: turn.created_at,
+    videoTask: mapVideoTask(turn.video),
+  }))
+  state.activeTurnId =
+    focusCurrent || !state.turns.some((turn) => turn.id === previousActiveId)
+      ? story.current_turn_id
+      : previousActiveId
+  state.phase = 'story-ready'
+  state.selectedChoiceId = null
 }
 
 async function submitDraft() {
@@ -156,17 +251,13 @@ async function submitDraft() {
     inputError.value = '请至少输入 3 个字，让故事有一个清晰的起点。'
     return
   }
-
-  if (state.phase === 'empty') {
-    await startStory(value)
-    return
-  }
-
+  if (state.phase === 'empty') return startStory(value)
   if (!choicesEnabled.value) {
-    inputError.value = '请先完成当前片段的 Mock 视频，再决定下一步。'
+    inputError.value = isCurrentTurn.value
+      ? '请先完成当前片段的视频，再决定下一步。'
+      : '请先在下方时间线返回当前故事片段。'
     return
   }
-
   await continueStory(value, null)
 }
 
@@ -175,15 +266,31 @@ async function startStory(idea: string) {
   state.idea = idea
   state.phase = 'story-generating'
   pushMessage('user', idea)
-  pushActivity('正在生成故事片段', 'Mock Qwen 响应将在本地返回', 'active')
+  pushActivity(
+    '正在生成故事片段',
+    backendAvailable.value ? `${state.providerMode === 'real' ? 'Qwen3.7-Flash' : '服务端 Mock Provider'}` : '本地 Mock Provider',
+    'active',
+  )
 
-  await mockGenerateStory()
-  const turn = createOpeningTurn(idea)
-  state.turns = [turn]
-  state.activeTurnId = turn.id
-  state.phase = 'story-ready'
-  pushMessage('assistant', `第一幕已经展开：${turn.summary}`)
-  pushActivity('故事片段已生成', '4 个后续方向已准备好', 'success')
+  try {
+    if (backendAvailable.value) {
+      const story = await apiClient.createStory(idea)
+      hydrateStory(story)
+    } else {
+      await mockGenerateStory()
+      const turn = createOpeningTurn(idea)
+      state.turns = [turn]
+      state.currentTurnId = turn.id
+      state.activeTurnId = turn.id
+      state.phase = 'story-ready'
+    }
+    pushMessage('assistant', `第一幕已经展开：${activeTurn.value?.summary}`)
+    pushActivity('故事片段已生成', '4 个后续方向已准备好', 'success')
+  } catch (error) {
+    state.phase = 'empty'
+    inputError.value = readableError(error)
+    pushActivity('故事生成失败', inputError.value, 'danger')
+  }
 }
 
 async function chooseDirection(choice: StoryChoice) {
@@ -193,107 +300,227 @@ async function chooseDirection(choice: StoryChoice) {
 }
 
 async function continueStory(direction: string, choiceId: string | null, label?: string) {
+  const currentTurn = activeTurn.value
+  if (!currentTurn) return
   state.phase = 'story-generating'
   draft.value = ''
   pushMessage('user', label ?? direction)
+  pushActivity('续写方向已确认', choiceId ? `固定选项 · ${label}` : '自定义剧情方向', 'active')
+
+  try {
+    if (backendAvailable.value && state.storyId) {
+      const story = await apiClient.choose(
+        state.storyId,
+        currentTurn.id,
+        choiceId ? { choice_id: choiceId } : { custom_direction: direction },
+      )
+      hydrateStory(story)
+    } else {
+      await mockContinueStory()
+      const turn = createContinuationTurn(direction, state.turns.length)
+      turn.parentTurnId = currentTurn.id
+      state.turns.push(turn)
+      state.currentTurnId = turn.id
+      state.activeTurnId = turn.id
+      state.phase = 'story-ready'
+      state.selectedChoiceId = null
+    }
+    pushMessage('assistant', `${activeTurn.value?.title}：${activeTurn.value?.summary}`)
+    pushActivity('下一片段已生成', '视频提示词可以在生成前编辑', 'success')
+  } catch (error) {
+    state.phase = 'story-ready'
+    inputError.value = readableError(error)
+    pushActivity('续写失败', inputError.value, 'danger')
+  }
+}
+
+async function startVideoGeneration(confirmSubmissionUnknown = false) {
+  const turn = activeTurn.value
+  if (!turn || !isCurrentTurn.value || isVideoBusy.value || turn.videoTask.status === 'succeeded') return
+  const outcome = nextOutcome.value
+  nextOutcome.value = 'success'
+  turn.videoTask = {
+    ...createIdleVideoTask(),
+    status: 'submitting',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    outcome,
+  }
+  promptEditorOpen.value = false
   pushActivity(
-    '续写方向已确认',
-    choiceId ? `固定选项 · ${label}` : '自定义剧情方向',
+    '视频任务提交中',
+    state.providerMode === 'real' ? 'Wan2.6 · 1280×720 · 5 秒' : 'Mock Wan · 无付费请求',
     'active',
   )
 
-  await mockContinueStory()
-  const turn = createContinuationTurn(direction, state.turns.length)
-  state.turns.push(turn)
-  state.activeTurnId = turn.id
-  state.phase = 'story-ready'
-  state.selectedChoiceId = null
-  state.videoTask = {
-    taskId: null,
-    status: 'idle',
-    startedAt: null,
-    updatedAt: null,
-    outcome: 'success',
-    error: null,
+  if (!backendAvailable.value || !state.storyId) {
+    updateLocalVideoTask()
+    return
   }
-  pushMessage('assistant', `${turn.title}：${turn.summary}`)
-  pushActivity('下一片段已生成', '视频提示词可以在生成前编辑', 'success')
+
+  try {
+    await apiClient.updateTurn(state.storyId, turn.id, { video_prompt: turn.videoPrompt })
+    const response = await apiClient.createVideo(state.storyId, turn.id, {
+      confirm_submission_unknown: confirmSubmissionUnknown,
+      ...(state.providerMode === 'mock' ? { mock_outcome: outcome } : {}),
+    })
+    turn.videoTask = mapVideoTask(response)
+    announceVideoStatus('submitting', response.status, response)
+  } catch (error) {
+    const message = readableError(error)
+    try {
+      const persisted = mapVideoTask(await apiClient.getVideo(state.storyId, turn.id))
+      turn.videoTask =
+        persisted.status === 'idle'
+          ? {
+              ...turn.videoTask,
+              status: 'failed',
+              error: message,
+              updatedAt: Date.now(),
+            }
+          : persisted
+    } catch {
+      turn.videoTask.status = 'failed'
+      turn.videoTask.error = message
+    }
+    pushActivity('视频提交失败', message, 'danger')
+  }
 }
 
-function startVideoGeneration() {
-  if (!activeTurn.value || isVideoBusy.value || state.videoTask.status === 'succeeded') return
-  const startedAt = Date.now()
-  const outcome = nextOutcome.value
-  nextOutcome.value = 'success'
-  state.videoTask = {
-    taskId: null,
-    status: 'submitting',
-    startedAt,
-    updatedAt: startedAt,
-    outcome,
-    error: null,
-  }
-  promptEditorOpen.value = false
-  pushActivity('视频任务提交中', 'Mock Wan · 1280×720 · 5 秒', 'active')
-  updateVideoTask()
+function updateLocalVideoTask() {
+  const turn = activeTurn.value
+  if (!turn?.videoTask.startedAt || !ACTIVE_VIDEO_STATES.includes(turn.videoTask.status)) return
+  const previous = turn.videoTask.status
+  const result = mockTaskStatus(turn.videoTask.startedAt, turn.videoTask.outcome)
+  turn.videoTask.status = result.status
+  turn.videoTask.taskId = result.taskId
+  turn.videoTask.providerStatus = result.status.toUpperCase()
+  turn.videoTask.error = result.error
+  turn.videoTask.updatedAt = Date.now()
+  announceVideoStatus(previous, result.status, turn.videoTask)
 }
 
-function updateVideoTask() {
-  const task = state.videoTask
-  if (!task.startedAt || !ACTIVE_VIDEO_STATES.includes(task.status)) return
-  const previous = task.status
-  const result = mockTaskStatus(task.startedAt, task.outcome)
-  task.status = result.status
-  task.taskId = result.taskId
-  task.error = result.error
-  task.updatedAt = Date.now()
-
-  if (previous === result.status) return
-
-  const activityByStatus: Partial<
-    Record<VideoStatus, { label: string; detail: string; tone: ActivityItem['tone'] }>
-  > = {
-    queued: { label: '视频任务已入队', detail: result.taskId ?? 'Mock task', tone: 'active' },
-    running: { label: '正在生成视频', detail: '供应商未提供真实百分比', tone: 'active' },
-    saving: { label: '正在保存视频', detail: '模拟持久化到本地媒体目录', tone: 'active' },
-    succeeded: { label: '视频已保存', detail: 'Mock 播放器现在可以预览', tone: 'success' },
-    failed: { label: '视频生成失败', detail: result.error ?? '未知错误', tone: 'danger' },
-    submission_unknown: {
-      label: '提交结果待确认',
-      detail: '已停止自动重试，避免重复计费',
-      tone: 'danger',
-    },
+async function pollBackendTasks() {
+  if (!backendAvailable.value || !state.storyId || pollingBackend.value) return
+  if (Date.now() - lastBackendPollAt < publicConfig.videoPollMs) return
+  const activeTasks = state.turns.filter((turn) => ACTIVE_VIDEO_STATES.includes(turn.videoTask.status))
+  if (!activeTasks.length) return
+  pollingBackend.value = true
+  lastBackendPollAt = Date.now()
+  try {
+    await Promise.all(
+      activeTasks.map(async (turn) => {
+        const previous = turn.videoTask.status
+        const response = await apiClient.getVideo(state.storyId!, turn.id)
+        turn.videoTask = mapVideoTask(response)
+        announceVideoStatus(previous, response.status, response)
+      }),
+    )
+  } catch (error) {
+    pushActivity('视频状态更新失败', readableError(error), 'danger')
+  } finally {
+    pollingBackend.value = false
   }
-  const activity = activityByStatus[result.status]
-  if (activity) pushActivity(activity.label, activity.detail, activity.tone)
-  if (result.status === 'succeeded') pushMessage('assistant', '当前片段已完成。选择一个方向，或者写下你自己的下一步。')
+}
+
+function announceVideoStatus(
+  previous: VideoStatus,
+  current: VideoStatus,
+  task: Pick<VideoTask, 'taskId' | 'error'> | VideoTaskResponse,
+) {
+  if (previous === current) return
+  const taskId = 'task_id' in task ? task.task_id : task.taskId
+  const error = task.error
+  const activityByStatus: Partial<Record<VideoStatus, [string, string, ActivityItem['tone']]>> = {
+    queued: ['视频任务已入队', taskId ?? '等待任务 ID', 'active'],
+    running: ['正在生成视频', '供应商未提供真实百分比', 'active'],
+    saving: ['正在保存视频', '服务端正在持久化临时结果', 'active'],
+    succeeded: ['视频已保存', '结果已由本项目媒体地址提供', 'success'],
+    failed: ['视频生成失败', error ?? '未知错误', 'danger'],
+    submission_unknown: ['提交结果待确认', '已停止自动重试，避免重复计费', 'danger'],
+  }
+  const activity = activityByStatus[current]
+  if (activity) pushActivity(...activity)
+  if (current === 'succeeded' && activeTurn.value?.videoTask.status === 'succeeded') {
+    pushMessage('assistant', '当前片段已完成。选择一个方向，或者写下你自己的下一步。')
+  }
 }
 
 function retryVideo() {
-  if (state.videoTask.status !== 'failed') return
-  startVideoGeneration()
+  if (activeVideoTask.value.status === 'failed') void startVideoGeneration()
 }
 
 function confirmUnknownRetry() {
-  if (state.videoTask.status !== 'submission_unknown') return
-  state.videoTask = {
-    taskId: null,
-    status: 'idle',
-    startedAt: null,
-    updatedAt: Date.now(),
-    outcome: 'success',
-    error: null,
+  if (activeVideoTask.value.status !== 'submission_unknown') return
+  if (backendAvailable.value) {
+    void startVideoGeneration(true)
+    return
   }
+  if (activeTurn.value) activeTurn.value.videoTask = createIdleVideoTask()
   pushActivity('未知任务已人工确认', '现在可以再次明确提交', 'neutral')
 }
 
-function togglePlayback() {
-  if (state.videoTask.status !== 'succeeded') return
+async function togglePlayback() {
+  if (activeVideoTask.value.status !== 'succeeded') return
+  if (hasPlayableVideo.value && videoElement.value) {
+    if (videoElement.value.paused) await videoElement.value.play()
+    else videoElement.value.pause()
+    isPlaying.value = !videoElement.value.paused
+    return
+  }
   isPlaying.value = !isPlaying.value
 }
 
+function onVideoTimeUpdate() {
+  if (videoElement.value) playhead.value = videoElement.value.currentTime
+}
+
+function syncVolumeState() {
+  const media = videoElement.value
+  if (!media) return
+  const current = readMediaVolume(media)
+  volumePercent.value = current.volumePercent
+  isMuted.value = current.muted
+  if (current.volumePercent > 0) lastAudibleVolumePercent.value = current.volumePercent
+}
+
+function onVolumeInput(event: Event) {
+  const media = videoElement.value
+  if (!media) return
+  const target = event.currentTarget as HTMLInputElement
+  const current = setMediaVolume(media, Number(target.value))
+  volumePercent.value = current.volumePercent
+  isMuted.value = current.muted
+  if (current.volumePercent > 0) lastAudibleVolumePercent.value = current.volumePercent
+}
+
+function toggleMute() {
+  const media = videoElement.value
+  if (!media) return
+  const current = toggleMediaMute(media, lastAudibleVolumePercent.value)
+  volumePercent.value = current.volumePercent
+  isMuted.value = current.muted
+}
+
+function syncFullscreenState() {
+  isFullscreen.value = isElementFullscreen(videoStage.value, document)
+}
+
+async function toggleFullscreen() {
+  const stage = videoStage.value
+  if (!stage) return
+  try {
+    await toggleElementFullscreen(stage, document)
+    syncFullscreenState()
+  } catch (error) {
+    pushActivity('全屏切换失败', readableError(error), 'danger')
+  }
+}
+
 function resetWorkspace() {
+  const mode = state.providerMode
   const fresh = emptyWorkspace()
+  fresh.providerMode = mode
   Object.assign(state, fresh)
   draft.value = ''
   inputError.value = ''
@@ -306,23 +533,59 @@ function resetWorkspace() {
 
 function selectTurn(turnId: string) {
   if (state.phase === 'story-generating') return
-  const turn = state.turns.find((item) => item.id === turnId)
-  if (!turn) return
+  if (!state.turns.some((item) => item.id === turnId)) return
   state.activeTurnId = turnId
+  playhead.value = 0
+  isPlaying.value = false
 }
 
-onMounted(() => {
-  if (isVideoBusy.value) {
-    restoredNotice.value = true
-    pushActivity('已恢复进行中的任务', state.videoTask.taskId ?? '等待供应商任务 ID', 'active')
-    noticeTimer = window.setTimeout(() => (restoredNotice.value = false), 4200)
+function readableError(error: unknown) {
+  if (error instanceof ApiError) return error.message
+  return error instanceof Error ? error.message : String(error)
+}
+
+async function connectBackend() {
+  if (publicConfig.useLocalMock) {
+    state.providerMode = 'local'
+    pushActivity('本地 Mock 模式', 'VITE_USE_LOCAL_MOCK=true', 'neutral')
+    return
   }
+  try {
+    const health = await apiClient.health()
+    backendAvailable.value = true
+    state.providerMode = health.provider_mode
+    pushActivity(
+      health.provider_mode === 'real' ? '真实 Provider 已启用' : '服务端 Mock 已连接',
+      health.provider_mode === 'real' ? '模型调用可能产生费用' : 'SQLite 持久化，不会调用付费 API',
+      health.provider_mode === 'real' ? 'active' : 'success',
+    )
+    if (state.storyId) {
+      const story = await apiClient.getStory(state.storyId)
+      hydrateStory(story)
+      if (state.turns.some((turn) => ACTIVE_VIDEO_STATES.includes(turn.videoTask.status))) {
+        restoredNotice.value = true
+        pushActivity('已从数据库恢复任务', '继续轮询原有任务，未创建新任务', 'active')
+        noticeTimer = window.setTimeout(() => (restoredNotice.value = false), 4200)
+      }
+    }
+  } catch (error) {
+    backendAvailable.value = false
+    state.providerMode = 'local'
+    if (state.storyId) resetWorkspace()
+    pushActivity('后端暂不可用', `已保留本地 Mock：${readableError(error)}`, 'danger')
+  }
+}
+
+onMounted(async () => {
+  document.addEventListener('fullscreenchange', syncFullscreenState)
+  await connectBackend()
   taskTimer = window.setInterval(() => {
     nowTick.value = Date.now()
-    updateVideoTask()
-  }, publicConfig.mockVideoPollMs)
+    if (backendAvailable.value) void pollBackendTasks()
+    else updateLocalVideoTask()
+  }, 500)
   playbackTimer = window.setInterval(() => {
-    if (!isPlaying.value || state.videoTask.status !== 'succeeded') return
+    if (hasPlayableVideo.value || !isPlaying.value || activeVideoTask.value.status !== 'succeeded') return
     const duration = activeTurn.value?.duration ?? 8
     if (playhead.value >= duration) {
       playhead.value = 0
@@ -334,6 +597,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('fullscreenchange', syncFullscreenState)
   if (taskTimer) window.clearInterval(taskTimer)
   if (playbackTimer) window.clearInterval(playbackTimer)
   if (noticeTimer) window.clearTimeout(noticeTimer)
@@ -345,7 +609,7 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <button class="brand" aria-label="SceneFork 首页" @click="resetWorkspace">
         <span>Scene</span><strong>Fork</strong>
-        <span class="phase-pill">MOCK</span>
+        <span class="phase-pill">{{ state.providerMode === 'real' ? 'LIVE' : 'MOCK' }}</span>
       </button>
       <button class="icon-button settings-button" aria-label="打开演示设置" @click="settingsOpen = true">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -354,24 +618,43 @@ onBeforeUnmount(() => {
         </svg>
       </button>
       <div class="header-spacer"></div>
-      <div class="connection-badge"><span></span> 本地演示 · 未连接 API</div>
+      <div class="connection-badge" :class="{ live: state.providerMode === 'real' }"><span></span> {{ connectionLabel }}</div>
     </header>
 
     <main class="workspace">
       <section class="canvas-panel">
-        <div class="video-stage" :class="[`status-${state.videoTask.status}`, { playing: isPlaying }]">
+        <div ref="videoStage" class="video-stage" :class="[`status-${activeVideoTask.status}`, { playing: isPlaying, fullscreen: isFullscreen }]">
           <div class="scene-backdrop" :class="`variant-${activeTurn?.imageVariant ?? 0}`"></div>
+          <img
+            v-if="hasImagePreview && activeMediaUrl"
+            class="generated-video"
+            :src="activeMediaUrl"
+            alt="Mock 视频预览"
+          />
+          <video
+            v-else-if="hasPlayableVideo && activeMediaUrl"
+            ref="videoElement"
+            class="generated-video"
+            :src="activeMediaUrl"
+            playsinline
+            @loadedmetadata="syncVolumeState"
+            @timeupdate="onVideoTimeUpdate"
+            @volumechange="syncVolumeState"
+            @play="isPlaying = true"
+            @pause="isPlaying = false"
+            @ended="isPlaying = false"
+          ></video>
           <div class="stage-shade"></div>
 
           <div class="stage-badges">
-            <span class="mock-badge">MOCK PREVIEW</span>
+            <span class="mock-badge">{{ previewLabel }}</span>
             <span v-if="activeTurn" class="scene-name">{{ activeTurn.title }}</span>
           </div>
 
           <transition name="notice">
             <div v-if="restoredNotice" class="restore-notice">
               <span class="spinner small"></span>
-              已从本地恢复同一个视频任务
+              {{ backendAvailable ? '已从数据库恢复同一个视频任务' : '已从本地恢复同一个视频任务' }}
             </div>
           </transition>
 
@@ -386,48 +669,48 @@ onBeforeUnmount(() => {
 
           <div v-else-if="state.phase === 'story-generating'" class="stage-center generation-state">
             <span class="spinner large"></span>
-            <p class="eyebrow">MOCK STORY ENGINE</p>
+            <p class="eyebrow">{{ isMockMode ? 'MOCK STORY ENGINE' : 'QWEN 3.8 FLASH' }}</p>
             <h2>{{ activeTurn ? '正在续写下一幕' : '正在构建故事世界' }}</h2>
             <p>整理角色、场景与四个不同的剧情方向…</p>
           </div>
 
-          <div v-else-if="state.videoTask.status === 'idle'" class="stage-center ready-state">
+          <div v-else-if="activeVideoTask.status === 'idle'" class="stage-center ready-state">
             <p class="eyebrow">故事片段已就绪</p>
             <h2>{{ activeTurn?.title }}</h2>
             <p>{{ activeTurn?.summary }}</p>
-            <button class="primary-button generate-button" @click="startVideoGeneration">
+            <button class="primary-button generate-button" :disabled="!isCurrentTurn" @click="startVideoGeneration()">
               <svg viewBox="0 0 24 24"><path d="m10 8 6 4-6 4V8Z" /><path d="M4.75 5.75A2.75 2.75 0 0 1 7.5 3h9A2.75 2.75 0 0 1 19.25 5.75v12.5A2.75 2.75 0 0 1 16.5 21h-9a2.75 2.75 0 0 1-2.75-2.75V5.75Z" /></svg>
-              生成 Mock 视频
+              {{ !isCurrentTurn ? '请返回当前片段' : isMockMode ? '生成 Mock 视频' : '生成视频' }}
             </button>
             <button class="text-button" @click="promptEditorOpen = true">先编辑视频提示词</button>
           </div>
 
           <div v-else-if="isVideoBusy" class="stage-center task-state">
             <span class="spinner large"></span>
-            <p class="eyebrow">{{ state.videoTask.status === 'saving' ? 'LOCAL MEDIA' : 'MOCK WAN 2.6' }}</p>
+            <p class="eyebrow">{{ activeVideoTask.status === 'saving' ? 'LOCAL MEDIA' : isMockMode ? 'MOCK WAN 2.6' : 'WAN 2.6' }}</p>
             <h2>{{ videoStatusLabel }}</h2>
             <p>已等待 {{ elapsedSeconds }} 秒 · 不展示虚构百分比</p>
-            <span v-if="state.videoTask.taskId" class="task-id">{{ state.videoTask.taskId }}</span>
+            <span v-if="activeVideoTask.taskId" class="task-id">{{ activeVideoTask.taskId }}</span>
           </div>
 
-          <div v-else-if="state.videoTask.status === 'failed'" class="stage-center error-state">
+          <div v-else-if="activeVideoTask.status === 'failed'" class="stage-center error-state">
             <span class="error-icon">!</span>
-            <p class="eyebrow">MOCK FAILURE</p>
+            <p class="eyebrow">{{ isMockMode ? 'MOCK FAILURE' : 'GENERATION FAILED' }}</p>
             <h2>这次没有生成成功</h2>
-            <p>{{ state.videoTask.error }}</p>
+            <p>{{ activeVideoTask.error }}</p>
             <button class="primary-button" @click="retryVideo">手动重试</button>
           </div>
 
-          <div v-else-if="state.videoTask.status === 'submission_unknown'" class="stage-center error-state unknown-state">
+          <div v-else-if="activeVideoTask.status === 'submission_unknown'" class="stage-center error-state unknown-state">
             <span class="error-icon">?</span>
             <p class="eyebrow">需要人工确认</p>
             <h2>任务是否提交成功尚不确定</h2>
-            <p>{{ state.videoTask.error }}</p>
+            <p>{{ activeVideoTask.error }}</p>
             <button class="secondary-button" @click="confirmUnknownRetry">我已核实，允许重新提交</button>
           </div>
 
           <button
-            v-else-if="state.videoTask.status === 'succeeded'"
+            v-else-if="activeVideoTask.status === 'succeeded'"
             class="center-play"
             :aria-label="isPlaying ? '暂停' : '播放'"
             @click="togglePlayback"
@@ -436,18 +719,47 @@ onBeforeUnmount(() => {
             <svg v-else viewBox="0 0 24 24"><path d="M7 6h4v12H7V6Zm6 0h4v12h-4V6Z" /></svg>
           </button>
 
-          <div v-if="state.videoTask.status === 'succeeded'" class="player-controls">
+          <div v-if="activeVideoTask.status === 'succeeded'" class="player-controls">
             <button class="player-button" :aria-label="isPlaying ? '暂停' : '播放'" @click="togglePlayback">
               <svg v-if="!isPlaying" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z" /></svg>
               <svg v-else viewBox="0 0 24 24"><path d="M6 5h4v14H6V5Zm8 0h4v14h-4V5Z" /></svg>
             </button>
             <span class="timecode">{{ formattedPlayhead }} / 0:{{ String(activeTurn?.duration ?? 8).padStart(2, '0') }}</span>
             <div class="scrubber"><span :style="{ width: `${(playhead / (activeTurn?.duration ?? 8)) * 100}%` }"></span></div>
-            <button class="player-button" aria-label="音量">
-              <svg viewBox="0 0 24 24"><path d="M5 10v4h3l4 3V7l-4 3H5Zm10-1.5a5 5 0 0 1 0 7M17.5 6a8.5 8.5 0 0 1 0 12" /></svg>
-            </button>
-            <button class="player-button" aria-label="全屏">
-              <svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
+            <div class="volume-control" :class="{ disabled: !hasPlayableVideo }">
+              <button
+                class="player-button"
+                :class="{ active: isMuted }"
+                :disabled="!hasPlayableVideo"
+                :aria-label="volumeButtonLabel"
+                :aria-pressed="isMuted"
+                @click="toggleMute"
+              >
+                <svg v-if="isMuted" viewBox="0 0 24 24"><path d="M5 10v4h3l4 3V7l-4 3H5Zm10 0 5 5m0-5-5 5" /></svg>
+                <svg v-else viewBox="0 0 24 24"><path d="M5 10v4h3l4 3V7l-4 3H5Zm10-1.5a5 5 0 0 1 0 7M17.5 6a8.5 8.5 0 0 1 0 12" /></svg>
+              </button>
+              <input
+                class="volume-slider"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                :value="volumePercent"
+                :disabled="!hasPlayableVideo"
+                aria-label="音量"
+                :aria-valuetext="`${volumePercent}%`"
+                @input="onVolumeInput"
+              />
+            </div>
+            <button
+              class="player-button"
+              :class="{ active: isFullscreen }"
+              :aria-label="isFullscreen ? '退出全屏' : '全屏'"
+              :aria-pressed="isFullscreen"
+              @click="toggleFullscreen"
+            >
+              <svg v-if="isFullscreen" viewBox="0 0 24 24"><path d="M9 3v6H3m12-6v6h6M9 21v-6H3m12 6v-6h6" /></svg>
+              <svg v-else viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
             </button>
             <button class="export-button" disabled title="阶段 A 尚未实现真实视频合并与导出">
               <svg viewBox="0 0 24 24"><path d="M12 16V3m0 0L8 7m4-4 4 4M5 13v6h14v-6" /></svg>
@@ -479,7 +791,7 @@ onBeforeUnmount(() => {
                 <span class="duration-badge">0:{{ String(turn.duration).padStart(2, '0') }}</span>
               </span>
               <span class="card-title">{{ turn.title }}</span>
-              <span class="card-meta">Mock 片段</span>
+              <span class="card-meta">{{ turn.videoTask.status === 'succeeded' ? (isMockMode ? 'Mock 片段' : '视频已保存') : '故事片段' }}</span>
             </button>
 
             <template v-if="activeTurn">
@@ -543,7 +855,7 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 24 24" :class="{ rotated: promptEditorOpen }"><path d="m8 10 4 4 4-4" /></svg>
             </button>
             <div v-if="promptEditorOpen" class="prompt-editor">
-              <textarea v-model="activeTurn.videoPrompt" :disabled="state.videoTask.status !== 'idle'" rows="5"></textarea>
+              <textarea v-model="activeTurn.videoPrompt" :disabled="!isCurrentTurn || activeVideoTask.status !== 'idle'" rows="5"></textarea>
               <small>仅当前片段使用；四个未选分支不会混入提示词。</small>
             </div>
           </section>
@@ -569,7 +881,7 @@ onBeforeUnmount(() => {
         <div v-else class="panel-scroll activity-scroll">
           <div class="activity-summary">
             <span class="status-orb" :class="{ pulsing: isVideoBusy }"></span>
-            <div><strong>{{ videoStatusLabel }}</strong><small>所有状态均为本地 Mock 演示</small></div>
+            <div><strong>{{ videoStatusLabel }}</strong><small>{{ isMockMode ? '当前为安全 Mock 模式，不调用付费 API' : '任务状态来自服务端数据库' }}</small></div>
           </div>
           <div class="activity-list">
             <article v-for="item in state.activity" :key="item.id" class="activity-item" :class="`tone-${item.tone}`">
@@ -595,7 +907,7 @@ onBeforeUnmount(() => {
               <button type="button" class="tool-button" disabled title="阶段 A 暂不支持上传参考图" aria-label="上传参考图（未实现）">
                 <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5Zm0 11 5-5 4 4 2-2 5 5M15.5 9A1.5 1.5 0 1 0 15.5 6a1.5 1.5 0 0 0 0 3Z" /></svg>
               </button>
-              <button type="button" class="tool-button" @click="settingsOpen = true" aria-label="Mock 设置">
+              <button type="button" class="tool-button" @click="settingsOpen = true" aria-label="生成设置">
                 <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2m4 0h10M4 12h4m4 0h8M14 5v4M8 15v4m2-9v4" /></svg>
               </button>
               <span class="shortcut">Ctrl + Enter</span>
@@ -612,13 +924,13 @@ onBeforeUnmount(() => {
       <div v-if="settingsOpen" class="modal-backdrop" @mousedown.self="settingsOpen = false">
         <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <div class="modal-header">
-            <div><span class="section-kicker">PHASE A</span><h2 id="settings-title">Mock 演示设置</h2></div>
+            <div><span class="section-kicker">PHASE B</span><h2 id="settings-title">生成设置</h2></div>
             <button class="icon-button" aria-label="关闭" @click="settingsOpen = false">
               <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
             </button>
           </div>
-          <p class="modal-intro">选择下一次视频任务的演示结果。这里不会发起网络请求，也不会产生模型费用。</p>
-          <fieldset>
+          <p class="modal-intro">{{ isMockMode ? '选择下一次视频任务的演示结果。Mock 模式不会产生模型费用。' : '当前已启用真实 Provider。生成视频可能产生模型费用，任务提交后不会自动重复创建。' }}</p>
+          <fieldset v-if="isMockMode">
             <legend>下一次视频生成</legend>
             <label :class="{ selected: nextOutcome === 'success' }">
               <input v-model="nextOutcome" value="success" type="radio" />
@@ -633,9 +945,9 @@ onBeforeUnmount(() => {
               <span><strong>结果未知</strong><small>演示禁止自动重试与人工确认</small></span>
             </label>
           </fieldset>
-          <div class="modal-note"><strong>刷新恢复</strong><span>生成期间直接刷新页面，即可验证恢复同一 Mock 任务。</span></div>
+          <div class="modal-note"><strong>刷新恢复</strong><span>{{ backendAvailable ? '任务保存在 SQLite 中；刷新只会恢复轮询，不会重新提交。' : '本地 Mock 状态保存在当前浏览器中。' }}</span></div>
           <div class="modal-footer">
-            <button class="danger-text-button" @click="resetWorkspace">清空本地演示</button>
+            <button class="danger-text-button" @click="resetWorkspace">开始新故事</button>
             <button class="primary-button" @click="settingsOpen = false">完成</button>
           </div>
         </section>

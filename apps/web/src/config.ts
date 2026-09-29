@@ -4,6 +4,7 @@ function positiveNumber(value: string | undefined, fallback: number): number {
 }
 
 export const publicConfig = Object.freeze({
-  apiBaseUrl: import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000',
-  mockVideoPollMs: positiveNumber(import.meta.env.VITE_VIDEO_POLL_MS, 1000),
+  apiBaseUrl: import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3000',
+  videoPollMs: positiveNumber(import.meta.env.VITE_VIDEO_POLL_MS, 4000),
+  useLocalMock: import.meta.env.VITE_USE_LOCAL_MOCK === 'true',
 })

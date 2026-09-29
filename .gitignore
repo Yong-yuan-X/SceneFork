@@ -6,8 +6,11 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+data/
 media/*
 !media/.gitkeep
 .DS_Store
 *.log
 *.tsbuildinfo
+coverage/
+/Design.md

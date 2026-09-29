@@ -18,6 +18,8 @@ export interface StoryChoice {
 
 export interface StoryTurn {
   id: string
+  storyId: string | null
+  parentTurnId: string | null
   title: string
   storyText: string
   summary: string
@@ -25,6 +27,8 @@ export interface StoryTurn {
   choices: StoryChoice[]
   duration: number
   imageVariant: number
+  createdAt: string
+  videoTask: VideoTask
 }
 
 export interface ChatMessage {
@@ -35,11 +39,16 @@ export interface ChatMessage {
 }
 
 export interface VideoTask {
+  id: string | null
+  version: number
   taskId: string | null
+  providerStatus: string | null
   status: VideoStatus
   startedAt: number | null
   updatedAt: number | null
   outcome: 'success' | 'failure' | 'unknown'
+  videoUrl: string | null
+  mediaType: string | null
   error: string | null
 }
 
@@ -52,12 +61,14 @@ export interface ActivityItem {
 }
 
 export interface PersistedWorkspace {
+  storyId: string | null
+  currentTurnId: string | null
+  providerMode: 'local' | 'mock' | 'real'
   phase: WorkspacePhase
   idea: string
   activeTurnId: string | null
   turns: StoryTurn[]
   messages: ChatMessage[]
-  videoTask: VideoTask
   activity: ActivityItem[]
   selectedChoiceId: string | null
 }
