@@ -2,23 +2,92 @@
 
 [中文](./README.zh-CN.md)
 
-SceneFork is an open-source AI interactive storytelling workspace that turns an idea into persisted story turns, generated videos, and selectable continuation directions.
+SceneFork is an open-source AI interactive storytelling workspace that turns an idea into versioned story turns, generated videos, and branching continuations.
 
-## Current status
+## Features
 
-The P1 workflow is implemented with Vue 3, Fastify, SQLite, Drizzle, and shared Zod schemas. It includes:
+- Qwen story generation with four fixed choices and custom continuation
+- Wan video generation with server-side polling, persistence, and restart recovery
+- Branches with shared ancestors and branch-scoped story paths
+- Immutable story/prompt versions, selectable video versions, and stale markers
+- Dynamic Recent Drafts numbering for projects with valid real videos
+- FFmpeg first-frame covers shared by Recent Drafts and STORY PATH
+- Independent Mock/Real modes for Qwen and Wan
 
-- a persisted multi-draft homepage with stable `draft1`, `draft2`, … numbering;
-- true story branches with shared ancestors and branch-only Qwen context;
-- immutable story/prompt versions, selectable video history, and branch-scoped stale markers;
-- a versioned P0-to-P1 migration that preserves existing task IDs and media paths;
-- Qwen-compatible structured story generation with runtime validation;
-- asynchronous Wan submission, server-side polling, media download, and restart recovery;
-- process-only Qwen/Wan key overrides with redacted status responses;
-- independent Mock/Real selection for Qwen and Wan, with Mock fallback when a key is missing;
-- FFmpeg first-frame draft covers with a non-failing placeholder fallback.
+The real Qwen and Wan API workflow has been manually verified. Mock remains the safe default to prevent accidental paid requests.
 
-The default configuration never calls a paid API. Real Qwen/Wan integration is implemented but has not been live-verified in this repository.
+## Quick start
+
+Requirements: Node.js 20+ and npm 10+.
+
+```bash
+npm install
+```
+
+Copy `.env.example` to `.env`, then start the API and frontend:
+
+```bash
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The API listens on `http://127.0.0.1:3000`.
+
+## Provider configuration
+
+The default configuration uses free Mock providers:
+
+```dotenv
+SCENEFORK_PROVIDER_MODE=mock
+QWEN_API_KEY=
+WAN_API_KEY=
+```
+
+To use the verified Alibaba Cloud workflow, update `.env` and restart the server:
+
+```dotenv
+SCENEFORK_PROVIDER_MODE=real
+QWEN_API_KEY=your-qwen-key
+WAN_API_KEY=your-wan-key
+QWEN_BASE_URL=your-compatible-mode-endpoint
+WAN_BASE_URL=your-video-api-endpoint
+QWEN_MODEL=qwen3.7-flash
+WAN_MODEL=wan2.6-t2v
+WAN_VIDEO_SIZE=1920*1080
+WAN_VIDEO_DURATION=5
+```
+
+The endpoints and keys must use the same Alibaba Cloud region/workspace. `DASHSCOPE_API_KEY` is supported as a shared fallback, while model-specific keys take precedence. `QWEN_PROVIDER_MODE` and `WAN_PROVIDER_MODE` can override the global mode independently.
+
+Temporary keys entered in Settings are kept only in backend process memory. Keys are never stored in SQLite or browser storage and must not be placed in a `VITE_*` variable.
+
+Install FFmpeg or set `FFMPEG_PATH` to generate and backfill video first-frame covers:
+
+```dotenv
+FFMPEG_PATH=ffmpeg
+FFMPEG_TIMEOUT_MS=15000
+```
+
+## Usage
+
+1. Enter an idea on the homepage to generate the opening story turn.
+2. Review or edit its video prompt, then generate the video.
+3. Choose one of four directions or enter a custom continuation.
+4. Select a historical turn and choose a different direction to create a branch without overwriting the original path.
+5. Use the Version panel to switch versions or explicitly regenerate the current story or video.
+6. Open, rename, or delete non-Main branches in the Branch Drawer.
+7. Reopen a Draft by clicking its card, or delete it from the card's three-dot menu.
+
+Recent Drafts only shows projects with a successful Real-provider video whose local media file still exists. Mock-only, empty, failed, and missing-media projects are excluded. Visible Draft numbers are recalculated after deletion.
+
+## Verification
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+SQLite data is stored under `data/` and generated media under `media/`; both are ignored by Git. Real video generation may incur charges. A submission timeout becomes `submission_unknown` and is not retried automatically, preventing duplicate paid requests.
 
 ## Showcase
 
@@ -29,68 +98,3 @@ The default configuration never calls a paid API. Real Qwen/Wan integration is i
 ### Homepage
 
 <img width="1904" height="929" alt="img_v3_02161_6e721cf2-d0ef-44ff-b957-d585645be61g" src="https://github.com/user-attachments/assets/cbe45549-9b75-49c9-94d4-417efe4b21d0" />
-
-## Requirements
-
-- Node.js 20 or newer
-- npm 10 or newer
-
-## Install and run
-
-```bash
-npm install
-npm run dev
-```
-
-Open `http://127.0.0.1:5173`. The API runs at `http://127.0.0.1:3000`.
-
-Production verification:
-
-```bash
-npm run typecheck
-npm test
-npm run build
-```
-
-## Safe Mock flow
-
-1. Enter a story idea on the homepage.
-2. Review or edit the generated segment's video prompt.
-3. Select **Generate mock video** and watch the persisted task states advance.
-4. Choose one of the four directions, or enter a custom continuation.
-5. Return to a historical turn and choose another direction to create a preserved fork.
-6. Refresh while a task is active to verify that the same SQLite task is restored.
-
-The Mock provider uses the real API, database, worker, and idempotency path but does not contact Alibaba Cloud. Browser storage only keeps the active story ID and UI state.
-
-## Environment
-
-Copy `.env.example` to `.env`. The safe defaults are:
-
-```dotenv
-SCENEFORK_PROVIDER_MODE=mock
-DASHSCOPE_API_KEY=
-QWEN_API_KEY=
-WAN_API_KEY=
-```
-
-To intentionally use Alibaba Cloud, set `SCENEFORK_PROVIDER_MODE=real`, provide model-specific `QWEN_API_KEY` / `WAN_API_KEY` or the legacy shared `DASHSCOPE_API_KEY`, and configure `QWEN_BASE_URL` and `WAN_BASE_URL`. Model-specific keys take precedence. The settings dialog applies process-memory overrides only and never writes `.env`, SQLite, or browser storage.
-
-Wan defaults to `1280*720` and 5 seconds. Video generation is billable in real mode. A submission timeout is stored as `submission_unknown` and is never retried automatically.
-Qwen and Wan use independently configurable request timeouts. `QWEN_REQUEST_TIMEOUT_MS` and `PROVIDER_REQUEST_TIMEOUT_MS` both default to 120 seconds; Wan submission timeouts still enter the protected `submission_unknown` flow instead of being retried automatically.
-
-Install FFmpeg or set `FFMPEG_PATH` to enable real first-frame draft covers. On startup, the backend also backfills missing covers from existing local videos without calling Wan again. Missing, failed, or timed-out FFmpeg execution falls back to a visibly distinct placeholder and never changes a successful video task to failed.
-
-## API
-
-- `POST /api/stories`
-- `GET /api/stories`
-- `GET /api/stories/:storyId`
-- `/api/stories/:storyId/branches...`
-- `PATCH /api/stories/:storyId/turns/:turnId`
-- `/api/stories/:storyId/turns/:turnId/versions...`
-- `POST|GET /api/stories/:storyId/turns/:turnId/video`
-- `POST /api/stories/:storyId/turns/:turnId/choose`
-- `GET|PUT /api/settings/keys` (local UI origin plus `X-SceneFork-Settings` barrier)
-
-Generated databases and media files are ignored by Git. Real provider verification must be deliberately enabled and may incur charges.

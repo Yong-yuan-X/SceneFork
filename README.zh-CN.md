@@ -2,23 +2,92 @@
 
 [English](./README.md)
 
-SceneFork 是一个开源的 AI 互动叙事工作台，可将一句创意展开为持久化故事片段、生成视频与可选择的续写方向。
+SceneFork 是一个开源的 AI 互动叙事工作台，可将一句创意展开为带版本、视频和分支的连续故事。
 
-## 当前状态
+## 功能
 
-P1 链路已使用 Vue 3、Fastify、SQLite、Drizzle 和共享 Zod Schema 实现，包含：
+- Qwen 结构化剧情生成，支持四个固定方向和自定义续写
+- Wan 视频生成、服务端轮询、持久化和重启恢复
+- 保留共享祖先、按分支展示的真实剧情树
+- 不可变剧情/Prompt 版本、可切换视频版本和 stale 标记
+- 仅展示有效真实视频项目并动态编号的 Recent Drafts
+- Recent Drafts 与 STORY PATH 共用 FFmpeg 视频首帧封面
+- Qwen/Wan 可分别使用 Mock 或 Real 模式
 
-- 多草稿首页与稳定的 draft1、draft2……编号；
-- 共享祖先但互不覆盖的真实剧情分支，Qwen 只读取当前分支路径；
-- 不可变剧情/Prompt 版本、可切换视频历史及分支级 stale 标记；
-- 保留 P0 任务 ID、媒体路径和版本号的显式版本化迁移；
-- Qwen 兼容的结构化故事生成与运行时校验；
-- Wan 异步提交、服务端轮询、媒体下载和服务重启恢复；
-- 仅保存在后端当前进程内的 Qwen/Wan 临时 Key 覆盖与脱敏状态；
-- Qwen/Wan 独立 Mock/Real 判定，缺少对应 Key 时自动使用 Mock；
-- FFmpeg 视频首帧草稿封面及不影响视频成功状态的占位降级。
+真实 Qwen 与 Wan API 链路已经过人工验证。项目仍默认使用安全的 Mock 模式，避免误触发付费请求。
 
-默认配置不会调用任何付费 API。真实 Qwen/Wan 接入代码已经实现，但本仓库尚未执行真实付费联调。
+## 快速开始
+
+环境要求：Node.js 20+、npm 10+。
+
+```bash
+npm install
+```
+
+将 `.env.example` 复制为 `.env`，然后同时启动 API 与前端：
+
+```bash
+npm run dev
+```
+
+打开 `http://127.0.0.1:5173`，API 地址为 `http://127.0.0.1:3000`。
+
+## Provider 配置
+
+默认配置使用免费的 Mock Provider：
+
+```dotenv
+SCENEFORK_PROVIDER_MODE=mock
+QWEN_API_KEY=
+WAN_API_KEY=
+```
+
+使用已经验证的阿里云真实链路时，修改 `.env` 后重启服务：
+
+```dotenv
+SCENEFORK_PROVIDER_MODE=real
+QWEN_API_KEY=你的-Qwen-Key
+WAN_API_KEY=你的-Wan-Key
+QWEN_BASE_URL=对应地域的兼容模式地址
+WAN_BASE_URL=对应地域的视频-API-地址
+QWEN_MODEL=qwen3.7-flash
+WAN_MODEL=wan2.6-t2v
+WAN_VIDEO_SIZE=1920*1080
+WAN_VIDEO_DURATION=5
+```
+
+API 地址与 Key 必须属于同一个阿里云地域/工作空间。也可以使用共享的 `DASHSCOPE_API_KEY`，但模型独立 Key 优先。`QWEN_PROVIDER_MODE` 和 `WAN_PROVIDER_MODE` 可分别覆盖全局模式。
+
+设置弹窗中的临时 Key 仅保存在后端当前进程内，不写入 SQLite 或浏览器存储。Key 不得放入任何 `VITE_*` 变量。
+
+安装 FFmpeg 或用 `FFMPEG_PATH` 指定可执行文件，可生成并自动补齐视频首帧封面：
+
+```dotenv
+FFMPEG_PATH=ffmpeg
+FFMPEG_TIMEOUT_MS=15000
+```
+
+## 使用方法
+
+1. 在首页输入创意，生成第一个剧情片段。
+2. 查看或编辑视频提示词，然后生成视频。
+3. 从四个固定方向中选择一个，或输入自定义续写。
+4. 回到历史片段选择不同方向，可创建新分支且不覆盖原路线。
+5. 在 Version 面板中切换版本，或明确重新生成当前剧情或视频。
+6. 在 Branch Drawer 中切换、重命名或删除非 Main 分支。
+7. 点击 Draft 卡片可重新进入，三点菜单可删除 Draft。
+
+Recent Drafts 只展示成功生成真实视频且本地媒体文件仍存在的项目。Mock-only、空项目、失败任务和媒体丢失项目不会显示；删除 Draft 后，首页编号会自动连续重排。
+
+## 检查与构建
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+SQLite 数据保存在 `data/`，生成媒体保存在 `media/`，两者都不会提交到 Git。真实视频生成可能产生费用；提交超时会进入 `submission_unknown`，系统不会自动重试，从而避免重复付费。
 
 ## 项目展示
 
@@ -29,68 +98,3 @@ P1 链路已使用 Vue 3、Fastify、SQLite、Drizzle 和共享 Zod Schema 实�
 ### 首页
 
 <img width="1904" height="929" alt="img_v3_02161_6e721cf2-d0ef-44ff-b957-d585645be61g" src="https://github.com/user-attachments/assets/06b4b945-af0d-4b1c-b599-300bf7bfc022" />
-
-## 环境要求
-
-- Node.js 20 或更新版本
-- npm 10 或更新版本
-
-## 安装与启动
-
-```bash
-npm install
-npm run dev
-```
-
-打开 `http://127.0.0.1:5173`，API 地址为 `http://127.0.0.1:3000`。
-
-生产构建验证：
-
-```bash
-npm run typecheck
-npm test
-npm run build
-```
-
-## 安全 Mock 流程
-
-1. 在首页输入故事创意。
-2. 查看或编辑生成片段的视频提示词。
-3. 点击“生成 Mock 视频”，观察数据库中的任务状态依次变化。
-4. 选择四个方向之一，或输入自定义续写方向。
-5. 返回历史镜头选择另一方向，验证原路线保留并生成新分支。
-6. 在任务进行中刷新页面，可验证恢复同一条 SQLite 任务。
-
-Mock Provider 使用与真实模式相同的 API、数据库、后台 worker 和幂等链路，但不会请求阿里云。浏览器存储仅保存当前故事 ID 与 UI 状态。
-
-## 环境变量
-
-将 `.env.example` 复制为 `.env`。安全默认值为：
-
-```dotenv
-SCENEFORK_PROVIDER_MODE=mock
-DASHSCOPE_API_KEY=
-QWEN_API_KEY=
-WAN_API_KEY=
-```
-
-如需主动启用阿里云真实服务，请设置 `SCENEFORK_PROVIDER_MODE=real`，并配置模型独立的 `QWEN_API_KEY` / `WAN_API_KEY`，或兼容的共享 `DASHSCOPE_API_KEY`，以及对应地域的 `QWEN_BASE_URL` 与 `WAN_BASE_URL`。模型独立 Key 优先。设置弹窗只覆盖后端当前进程内存，不写入 `.env`、SQLite 或浏览器存储。
-
-Wan 默认使用 `1280*720`、5 秒规格。真实模式的视频生成会产生费用；提交超时会持久化为 `submission_unknown`，绝不会自动重试。
-Qwen 与 Wan 使用相互独立的请求超时配置；`QWEN_REQUEST_TIMEOUT_MS` 和 `PROVIDER_REQUEST_TIMEOUT_MS` 均默认 120 秒。Wan 提交超时后仍会进入受保护的 `submission_unknown` 状态，不会自动重试付费请求。
-
-安装 FFmpeg 或通过 `FFMPEG_PATH` 指定程序路径可启用真实视频首帧封面。后端启动时也会从已有本地视频补提缺失封面，不会再次调用 Wan。FFmpeg 缺失、失败或超时只会使用明显不同的占位封面，不会把已成功保存的视频任务改成失败。
-
-## API
-
-- `POST /api/stories`
-- `GET /api/stories`
-- `GET /api/stories/:storyId`
-- `/api/stories/:storyId/branches...`
-- `PATCH /api/stories/:storyId/turns/:turnId`
-- `/api/stories/:storyId/turns/:turnId/versions...`
-- `POST|GET /api/stories/:storyId/turns/:turnId/video`
-- `POST /api/stories/:storyId/turns/:turnId/choose`
-- `GET|PUT /api/settings/keys`（仅允许本机 UI 来源并要求 `X-SceneFork-Settings` 请求头）
-
-生成的数据库和媒体文件均被 Git 忽略。真实 Provider 验证必须由开发者主动启用，并可能产生费用。
