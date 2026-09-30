@@ -24,11 +24,11 @@ P1 链路已使用 Vue 3、Fastify、SQLite、Drizzle 和共享 Zod Schema 实�
 
 ### 生成视频
 
-> 视频展示预留位置——后续在此放入最终生成视频或预览。
+<img width="1906" height="904" alt="20260930144512_rec_" src="https://github.com/user-attachments/assets/a238a5f4-469f-4fb9-94e8-3c6c1e9780ec" />
 
 ### 首页
 
-> 首页展示预留位置——后续在此放入最终首页截图。
+<img width="1904" height="929" alt="img_v3_02161_6e721cf2-d0ef-44ff-b957-d585645be61g" src="https://github.com/user-attachments/assets/06b4b945-af0d-4b1c-b599-300bf7bfc022" />
 
 ## 环境要求
 
