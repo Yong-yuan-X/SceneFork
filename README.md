@@ -24,11 +24,11 @@ The default configuration never calls a paid API. Real Qwen/Wan integration is i
 
 ### Generated video
 
-> Video demo placeholder — add the final generated-video clip or preview here.
+<img width="1906" height="904" alt="20260930144512_rec_" src="https://github.com/user-attachments/assets/7d4d2c59-e2df-412f-a7a2-cc3fba3279dc" />
 
 ### Homepage
 
-> Homepage showcase placeholder — add the final homepage screenshot here.
+<img width="1904" height="929" alt="img_v3_02161_6e721cf2-d0ef-44ff-b957-d585645be61g" src="https://github.com/user-attachments/assets/cbe45549-9b75-49c9-94d4-417efe4b21d0" />
 
 ## Requirements
 
