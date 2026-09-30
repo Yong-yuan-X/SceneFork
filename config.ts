@@ -16,6 +16,11 @@ const environmentSchema = z
     API_HOST: z.string().min(1).default('127.0.0.1'),
     API_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     DASHSCOPE_API_KEY: z.string().trim().default(''),
+    QWEN_API_KEY: z.string().trim().default(''),
+    WAN_API_KEY: z.string().trim().default(''),
+    QWEN_PROVIDER_MODE: z.enum(['mock', 'real']).optional(),
+    WAN_PROVIDER_MODE: z.enum(['mock', 'real']).optional(),
+    WEB_ORIGIN: z.string().trim().default('http://127.0.0.1:5173'),
     QWEN_MODEL: z.string().trim().min(1).default('qwen3.7-flash'),
     WAN_MODEL: z.string().trim().min(1).default('wan2.6-t2v'),
     QWEN_BASE_URL: z.string().trim().default(''),
@@ -28,26 +33,54 @@ const environmentSchema = z
     PROVIDER_REQUEST_TIMEOUT_MS: positiveInteger(120_000),
     QWEN_REQUEST_TIMEOUT_MS: positiveInteger(120_000),
     QWEN_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(2),
+    FFMPEG_PATH: z.string().trim().min(1).default('ffmpeg'),
+    FFMPEG_TIMEOUT_MS: positiveInteger(15_000),
   })
   .superRefine((environment, context) => {
-    if (environment.SCENEFORK_PROVIDER_MODE !== 'real') return
-
-    const required = [
-      ['DASHSCOPE_API_KEY', environment.DASHSCOPE_API_KEY],
-      ['QWEN_BASE_URL', environment.QWEN_BASE_URL],
-      ['WAN_BASE_URL', environment.WAN_BASE_URL],
-    ] as const
-
-    for (const [name, value] of required) {
-      if (!value) {
-        context.addIssue({
-          code: 'custom',
-          path: [name],
-          message: `${name} is required when SCENEFORK_PROVIDER_MODE=real`,
-        })
-      }
+    if (!['127.0.0.1', 'localhost', '::1'].includes(environment.API_HOST)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['API_HOST'],
+        message: 'API_HOST must remain bound to the local machine',
+      })
     }
-
+    if (!URL.canParse(environment.WEB_ORIGIN)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['WEB_ORIGIN'],
+        message: 'WEB_ORIGIN must be a valid local URL',
+      })
+    } else if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(new URL(environment.WEB_ORIGIN).hostname)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['WEB_ORIGIN'],
+        message: 'WEB_ORIGIN must point to the local machine',
+      })
+    }
+    const qwenMode = environment.QWEN_PROVIDER_MODE ?? environment.SCENEFORK_PROVIDER_MODE
+    const wanMode = environment.WAN_PROVIDER_MODE ?? environment.SCENEFORK_PROVIDER_MODE
+    if (
+      qwenMode === 'real' &&
+      (environment.QWEN_API_KEY || environment.DASHSCOPE_API_KEY) &&
+      !environment.QWEN_BASE_URL
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['QWEN_BASE_URL'],
+        message: 'QWEN_BASE_URL is required when Qwen real mode has a key',
+      })
+    }
+    if (
+      wanMode === 'real' &&
+      (environment.WAN_API_KEY || environment.DASHSCOPE_API_KEY) &&
+      !environment.WAN_BASE_URL
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['WAN_BASE_URL'],
+        message: 'WAN_BASE_URL is required when Wan real mode has a key',
+      })
+    }
     for (const [name, value] of [
       ['QWEN_BASE_URL', environment.QWEN_BASE_URL],
       ['WAN_BASE_URL', environment.WAN_BASE_URL],
@@ -103,6 +136,11 @@ export interface AppConfig {
   host: string
   port: number
   dashscopeApiKey: string
+  qwenApiKey?: string
+  wanApiKey?: string
+  qwenProviderMode?: 'mock' | 'real'
+  wanProviderMode?: 'mock' | 'real'
+  webOrigin?: string
   qwenModel: string
   wanModel: string
   qwenBaseUrl: string
@@ -115,6 +153,8 @@ export interface AppConfig {
   providerRequestTimeoutMs: number
   qwenRequestTimeoutMs: number
   qwenMaxRetries: number
+  ffmpegPath?: string
+  ffmpegTimeoutMs?: number
 }
 
 export function readConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -126,6 +166,11 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     host: parsed.API_HOST,
     port: parsed.API_PORT,
     dashscopeApiKey: parsed.DASHSCOPE_API_KEY,
+    qwenApiKey: parsed.QWEN_API_KEY,
+    wanApiKey: parsed.WAN_API_KEY,
+    qwenProviderMode: parsed.QWEN_PROVIDER_MODE ?? parsed.SCENEFORK_PROVIDER_MODE,
+    wanProviderMode: parsed.WAN_PROVIDER_MODE ?? parsed.SCENEFORK_PROVIDER_MODE,
+    webOrigin: parsed.WEB_ORIGIN.replace(/\/$/, ''),
     qwenModel: parsed.QWEN_MODEL,
     wanModel: parsed.WAN_MODEL,
     qwenBaseUrl: parsed.QWEN_BASE_URL.replace(/\/$/, ''),
@@ -138,6 +183,8 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     providerRequestTimeoutMs: parsed.PROVIDER_REQUEST_TIMEOUT_MS,
     qwenRequestTimeoutMs: parsed.QWEN_REQUEST_TIMEOUT_MS,
     qwenMaxRetries: parsed.QWEN_MAX_RETRIES,
+    ffmpegPath: parsed.FFMPEG_PATH,
+    ffmpegTimeoutMs: parsed.FFMPEG_TIMEOUT_MS,
   })
 }
 

@@ -6,17 +6,29 @@ SceneFork is an open-source AI interactive storytelling workspace that turns an 
 
 ## Current status
 
-The Phase B P0 workflow is implemented with Vue 3, Fastify, SQLite, Drizzle, and shared Zod schemas. It includes:
+The P1 workflow is implemented with Vue 3, Fastify, SQLite, Drizzle, and shared Zod schemas. It includes:
 
-- persisted stories, turns, choices, selections, video tasks, and local media;
+- a persisted multi-draft homepage with stable `draft1`, `draft2`, … numbering;
+- true story branches with shared ancestors and branch-only Qwen context;
+- immutable story/prompt versions, selectable video history, and branch-scoped stale markers;
+- a versioned P0-to-P1 migration that preserves existing task IDs and media paths;
 - Qwen-compatible structured story generation with runtime validation;
 - asynchronous Wan submission, server-side polling, media download, and restart recovery;
-- one independently tracked video task per story turn;
-- database-backed idempotency for duplicate video submissions;
-- one continuation path shared by preset choices and custom directions;
-- a safe server-side Mock provider used whenever real mode is not explicitly enabled.
+- process-only Qwen/Wan key overrides with redacted status responses;
+- independent Mock/Real selection for Qwen and Wan, with Mock fallback when a key is missing;
+- FFmpeg first-frame draft covers with a non-failing placeholder fallback.
 
 The default configuration never calls a paid API. Real Qwen/Wan integration is implemented but has not been live-verified in this repository.
+
+## Showcase
+
+### Generated video
+
+> Video demo placeholder — add the final generated-video clip or preview here.
+
+### Homepage
+
+> Homepage showcase placeholder — add the final homepage screenshot here.
 
 ## Requirements
 
@@ -42,11 +54,11 @@ npm run build
 
 ## Safe Mock flow
 
-1. Enter a story idea in the right-hand composer.
+1. Enter a story idea on the homepage.
 2. Review or edit the generated segment's video prompt.
 3. Select **Generate mock video** and watch the persisted task states advance.
 4. Choose one of the four directions, or enter a custom continuation.
-5. Open the settings button to make the next task succeed, fail, or return an unknown submission result.
+5. Return to a historical turn and choose another direction to create a preserved fork.
 6. Refresh while a task is active to verify that the same SQLite task is restored.
 
 The Mock provider uses the real API, database, worker, and idempotency path but does not contact Alibaba Cloud. Browser storage only keeps the active story ID and UI state.
@@ -58,19 +70,27 @@ Copy `.env.example` to `.env`. The safe defaults are:
 ```dotenv
 SCENEFORK_PROVIDER_MODE=mock
 DASHSCOPE_API_KEY=
+QWEN_API_KEY=
+WAN_API_KEY=
 ```
 
-To intentionally use Alibaba Cloud, set `SCENEFORK_PROVIDER_MODE=real`, provide `DASHSCOPE_API_KEY`, `QWEN_BASE_URL`, and `WAN_BASE_URL`, and ensure all three belong to the same region and workspace. The API key is read only by the server-side root `config.ts`; never place it in a `VITE_*` variable.
+To intentionally use Alibaba Cloud, set `SCENEFORK_PROVIDER_MODE=real`, provide model-specific `QWEN_API_KEY` / `WAN_API_KEY` or the legacy shared `DASHSCOPE_API_KEY`, and configure `QWEN_BASE_URL` and `WAN_BASE_URL`. Model-specific keys take precedence. The settings dialog applies process-memory overrides only and never writes `.env`, SQLite, or browser storage.
 
 Wan defaults to `1280*720` and 5 seconds. Video generation is billable in real mode. A submission timeout is stored as `submission_unknown` and is never retried automatically.
 Qwen and Wan use independently configurable request timeouts. `QWEN_REQUEST_TIMEOUT_MS` and `PROVIDER_REQUEST_TIMEOUT_MS` both default to 120 seconds; Wan submission timeouts still enter the protected `submission_unknown` flow instead of being retried automatically.
 
+Install FFmpeg or set `FFMPEG_PATH` to enable real first-frame draft covers. On startup, the backend also backfills missing covers from existing local videos without calling Wan again. Missing, failed, or timed-out FFmpeg execution falls back to a visibly distinct placeholder and never changes a successful video task to failed.
+
 ## API
 
 - `POST /api/stories`
+- `GET /api/stories`
 - `GET /api/stories/:storyId`
+- `/api/stories/:storyId/branches...`
 - `PATCH /api/stories/:storyId/turns/:turnId`
+- `/api/stories/:storyId/turns/:turnId/versions...`
 - `POST|GET /api/stories/:storyId/turns/:turnId/video`
 - `POST /api/stories/:storyId/turns/:turnId/choose`
+- `GET|PUT /api/settings/keys` (local UI origin plus `X-SceneFork-Settings` barrier)
 
 Generated databases and media files are ignored by Git. Real provider verification must be deliberately enabled and may incur charges.

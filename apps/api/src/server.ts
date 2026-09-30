@@ -9,20 +9,20 @@ import { createDatabase, type SceneForkDatabase } from './db/database.js'
 import { Repository } from './db/repository.js'
 import { AppError } from './errors.js'
 import {
-  MockStoryProvider,
-  QwenStoryProvider,
+  RuntimeStoryProvider,
   type StoryProvider,
 } from './providers/story-provider.js'
 import {
-  MockVideoProvider,
-  WanVideoProvider,
+  RuntimeVideoProvider,
   type VideoProvider,
 } from './providers/video-provider.js'
 import { registerStoryRoutes } from './routes/story-routes.js'
+import { registerSettingsRoutes } from './routes/settings-routes.js'
 import { MediaService } from './services/media-service.js'
 import { StoryService } from './services/story-service.js'
 import { VideoService } from './services/video-service.js'
 import { VideoWorker } from './workers/video-worker.js'
+import { CredentialService } from './services/credential-service.js'
 
 export interface ServerOptions {
   config?: AppConfig
@@ -36,27 +36,31 @@ export async function buildServer(options: ServerOptions = {}) {
   const config = options.config ?? appConfig
   const ownsDatabase = !options.database
   const database = options.database ?? createDatabase(config.databasePath)
-  const repository = new Repository(database, config.providerMode)
+  const credentials = new CredentialService(config)
+  const repository = new Repository(database, () => ({
+    story: credentials.get('qwen').mode,
+    video: credentials.get('wan').mode,
+  }), config.mediaDir)
   const storyProvider =
     options.storyProvider ??
-    (config.providerMode === 'real'
-      ? new QwenStoryProvider(config)
-      : new MockStoryProvider())
+    new RuntimeStoryProvider(config, credentials)
   const videoProvider =
     options.videoProvider ??
-    (config.providerMode === 'real'
-      ? new WanVideoProvider(config)
-      : new MockVideoProvider())
+    new RuntimeVideoProvider(config, credentials)
   const mediaService = new MediaService(config)
   const storyService = new StoryService(repository, storyProvider)
-  const videoService = new VideoService(config, repository, videoProvider)
-  const videoWorker = new VideoWorker(config, repository, videoProvider, mediaService)
+  const videoService = new VideoService(config, repository, videoProvider, credentials, mediaService)
+  const videoWorker = new VideoWorker(config, repository, videoProvider, mediaService, credentials)
 
   fs.mkdirSync(config.mediaDir, { recursive: true })
   const app = Fastify({ logger: false, requestIdHeader: 'x-request-id' })
   await app.register(cors, {
-    origin: true,
-    methods: ['GET', 'HEAD', 'POST', 'PATCH'],
+    origin: (origin, callback) => {
+      const allowed = !origin || origin === (config.webOrigin ?? 'http://127.0.0.1:5173')
+      callback(null, allowed)
+    },
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['content-type', 'x-request-id', 'x-scenefork-settings'],
   })
   await app.register(fastifyStatic, {
     root: config.mediaDir,
@@ -66,10 +70,15 @@ export async function buildServer(options: ServerOptions = {}) {
 
   app.get('/api/health', async () => ({
     status: 'ok',
-    provider_mode: config.providerMode,
+    provider_mode: credentials.get('qwen').mode,
+    provider_modes: {
+      story: credentials.get('qwen').mode,
+      video: credentials.get('wan').mode,
+    },
     api_version: 'v1',
   }))
   registerStoryRoutes(app, { storyService, videoService })
+  registerSettingsRoutes(app, config, credentials, repository)
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
@@ -100,5 +109,5 @@ export async function buildServer(options: ServerOptions = {}) {
 
   if (options.startWorker !== false) videoWorker.start()
 
-  return { app, repository, storyService, videoService, videoWorker, database }
+  return { app, repository, storyService, videoService, videoWorker, database, credentials }
 }

@@ -83,7 +83,7 @@ svg {
   padding: 12px 18px 10px 24px;
   display: flex;
   align-items: center;
-  gap: 22px;
+  gap: 12px;
 }
 
 .brand {
@@ -96,6 +96,7 @@ svg {
   font-size: 28px;
   font-weight: 780;
   letter-spacing: -1.2px;
+  margin-right: 10px;
 }
 
 .brand strong {
@@ -140,9 +141,34 @@ svg {
   stroke-linejoin: round;
 }
 
+.home-button {
+  color: var(--aqua);
+}
+
 .settings-button svg path:first-child {
   fill: currentColor;
   stroke: none;
+}
+
+.branch-switch {
+  min-width: 94px;
+  height: 39px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: #8da3b0;
+  background: rgba(11, 27, 39, 0.75);
+  font-size: 10px;
+}
+
+.branch-switch svg {
+  width: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
 }
 
 .header-spacer {
@@ -759,6 +785,19 @@ svg {
   border-radius: 8px;
 }
 
+.thumb.real-cover {
+  filter: none;
+  background-image: none;
+}
+
+.turn-cover {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  object-fit: cover;
+}
+
 .thumb::after {
   content: '';
   position: absolute;
@@ -778,6 +817,22 @@ svg {
   font-size: 10px;
   line-height: 1;
   backdrop-filter: blur(4px);
+}
+
+.stale-badge {
+  width: 21px;
+  height: 21px;
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #2b1a02;
+  background: var(--warning);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .number-badge {
@@ -1083,6 +1138,33 @@ svg {
   color: #5e7281;
   font-size: 9px;
   line-height: 1.5;
+}
+
+.story-text-editor {
+  margin-bottom: 11px;
+}
+
+.editor-actions {
+  margin-top: 9px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor-actions .text-button {
+  margin-top: 0;
+}
+
+.editor-actions .secondary-button {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: 10px;
+}
+
+.inline-edit {
+  margin: -7px 0 7px;
+  padding-left: 0;
 }
 
 .choice-panel {

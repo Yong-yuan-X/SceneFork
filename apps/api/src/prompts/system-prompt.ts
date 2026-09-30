@@ -9,5 +9,6 @@ The four next_choices are mutually distinct candidate directions; none of them h
 story_text is creator-facing prose. summary is a compact factual recap. 
 video_prompt is an English production prompt for only the current turn and must not include any unselected choice. 
 It should describe subject consistency, environment, lighting, action, camera movement, and a 16:9 cinematic composition suitable for a short Wan video.
+End video_prompt with the requested approximate duration, for example: 5 seconds.
 
 Return exactly four next_choices. Each choice needs a short label and a complete direction sentence.`

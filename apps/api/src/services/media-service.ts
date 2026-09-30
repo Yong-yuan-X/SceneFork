@@ -1,17 +1,24 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { AppConfig } from '../../../../config.js'
 import { ProviderError } from '../errors.js'
 
 export class MediaService {
   constructor(private readonly config: AppConfig) {}
 
-  async save(taskId: string, sourceUrl: string): Promise<{ filename: string; mediaType: string }> {
+  async save(taskId: string, sourceUrl: string): Promise<{
+    filename: string
+    mediaType: string
+    thumbnailFilename: string | null
+  }> {
     await fs.mkdir(this.config.mediaDir, { recursive: true })
     if (sourceUrl === 'mock://preview') {
       const filename = `${taskId}.svg`
       await fs.writeFile(path.join(this.config.mediaDir, filename), MOCK_PREVIEW_SVG, 'utf8')
-      return { filename, mediaType: 'image/svg+xml' }
+      return { filename, mediaType: 'image/svg+xml', thumbnailFilename: null }
     }
 
     const controller = new AbortController()
@@ -26,12 +33,63 @@ export class MediaService {
       const extension = contentType === 'video/webm' ? 'webm' : 'mp4'
       const filename = `${taskId}.${extension}`
       const bytes = Buffer.from(await response.arrayBuffer())
-      await fs.writeFile(path.join(this.config.mediaDir, filename), bytes)
-      return { filename, mediaType: contentType }
+      const finalPath = path.join(this.config.mediaDir, filename)
+      const temporaryPath = path.join(this.config.mediaDir, `${taskId}.${randomUUID()}.download`)
+      await fs.writeFile(temporaryPath, bytes)
+      await fs.rename(temporaryPath, finalPath)
+      const thumbnailFilename = await this.extractThumbnail(taskId, finalPath)
+      return { filename, mediaType: contentType, thumbnailFilename }
     } finally {
       clearTimeout(timeout)
     }
   }
+
+  async extractThumbnail(taskId: string, videoPath: string): Promise<string | null> {
+    const filename = `${taskId}.cover.jpg`
+    const finalPath = path.join(this.config.mediaDir, filename)
+    try {
+      await fs.access(finalPath)
+      return filename
+    } catch {
+      // Extract it once below.
+    }
+
+    const temporaryPath = path.join(
+      this.config.mediaDir,
+      `${taskId}.${randomUUID()}.cover.jpg`,
+    )
+    try {
+      await execFileAsync(
+        this.config.ffmpegPath ?? 'ffmpeg',
+        ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '0', '-i', videoPath, '-frames:v', '1', '-q:v', '3', temporaryPath],
+        { timeout: this.config.ffmpegTimeoutMs ?? 15_000, windowsHide: true },
+      )
+      await fs.rename(temporaryPath, finalPath)
+      console.info(`[media_service] Video thumbnail extracted task=${taskId}`)
+      return filename
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+      const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
+      if (code === 'ENOENT') {
+        console.warn('[media_service] FFmpeg not found, falling back to default thumbnail')
+      } else {
+        console.warn(
+          `[media_service] Thumbnail extraction failed; using default thumbnail task=${taskId} error=${safeError(error)}`,
+        )
+      }
+      return null
+    }
+  }
+
+  retryThumbnail(taskId: string, mediaFilename: string) {
+    return this.extractThumbnail(taskId, path.join(this.config.mediaDir, mediaFilename))
+  }
+}
+
+const execFileAsync = promisify(execFile)
+
+function safeError(error: unknown) {
+  return error instanceof Error ? error.message.replace(/[\r\n]+/g, ' ') : String(error)
 }
 
 const MOCK_PREVIEW_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">

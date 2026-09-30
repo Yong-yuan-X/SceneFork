@@ -3,6 +3,7 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
 import * as schema from './schema.js'
+import { runMigrations } from './migrations/index.js'
 
 export function createDatabase(databasePath: string) {
   if (databasePath !== ':memory:') {
@@ -14,6 +15,7 @@ export function createDatabase(databasePath: string) {
   sqlite.pragma('foreign_keys = ON')
   sqlite.pragma('busy_timeout = 5000')
   migrate(sqlite)
+  runMigrations(sqlite)
 
   return {
     sqlite,
@@ -70,8 +72,6 @@ function migrate(sqlite: Database.Database) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS selections_turn_unique ON selections(turn_id);
-
     CREATE TABLE IF NOT EXISTS video_tasks (
       id TEXT PRIMARY KEY,
       turn_id TEXT NOT NULL REFERENCES story_turns(id) ON DELETE CASCADE,

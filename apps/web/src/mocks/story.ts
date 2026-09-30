@@ -11,6 +11,8 @@ export function createIdleVideoTask(): VideoTask {
     updatedAt: null,
     outcome: 'success',
     videoUrl: null,
+    coverUrl: null,
+    coverKind: 'placeholder',
     mediaType: null,
     error: null,
   }

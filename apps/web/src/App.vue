@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import type { StoryResponse, VideoTaskResponse } from '@scenefork/shared'
+import type {
+  KeysStatusResponse,
+  StoryListItem,
+  StoryResponse,
+  TurnContentVersionResponse,
+  UpdateKeysRequest,
+  VideoTaskResponse,
+} from '@scenefork/shared'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { publicConfig } from './config'
 import {
@@ -25,6 +32,10 @@ import type {
   VideoStatus,
   VideoTask,
 } from './types'
+import HomePage from './components/HomePage.vue'
+import KeySettingsModal from './components/KeySettingsModal.vue'
+import BranchDrawer from './components/BranchDrawer.vue'
+import VersionPanel from './components/VersionPanel.vue'
 
 const STORAGE_KEY = 'scenefork.workspace.v2'
 const ACTIVE_VIDEO_STATES: VideoStatus[] = ['submitting', 'queued', 'running', 'saving']
@@ -41,11 +52,13 @@ function emptyWorkspace(): PersistedWorkspace {
   return {
     storyId: null,
     currentTurnId: null,
+    currentBranchId: null,
     providerMode: 'local',
     phase: 'empty',
     idea: '',
     activeTurnId: null,
     turns: [],
+    treeTurns: [],
     messages: [
       {
         id: id(),
@@ -64,6 +77,7 @@ function emptyWorkspace(): PersistedWorkspace {
       },
     ],
     selectedChoiceId: null,
+    branches: [],
   }
 }
 
@@ -87,10 +101,26 @@ function loadWorkspace(): PersistedWorkspace {
 }
 
 const state = reactive<PersistedWorkspace>(loadWorkspace())
+const currentView = ref<'home' | 'workspace'>('home')
+const drafts = ref<StoryListItem[]>([])
+const draftPage = ref(1)
+const draftTotalPages = ref(0)
+const draftsLoading = ref(false)
+const homeCreating = ref(false)
+const deletingDraftId = ref<string | null>(null)
+const homeError = ref('')
 const draft = ref('')
 const activeTab = ref<'conversation' | 'activity'>('conversation')
 const settingsOpen = ref(false)
+const keyStatus = ref<KeysStatusResponse | null>(null)
+const keyBusy = ref(false)
+const keyError = ref('')
+const branchDrawerOpen = ref(false)
+const versionPanelOpen = ref(false)
+const versionBusy = ref(false)
+const contentVersions = ref<TurnContentVersionResponse[]>([])
 const promptEditorOpen = ref(false)
+const storyEditorOpen = ref(false)
 const nextOutcome = ref<'success' | 'failure' | 'unknown'>('success')
 const inputError = ref('')
 const isPlaying = ref(false)
@@ -113,18 +143,22 @@ const activeTurn = computed(() =>
 )
 const activeVideoTask = computed(() => activeTurn.value?.videoTask ?? createIdleVideoTask())
 const isVideoBusy = computed(() => ACTIVE_VIDEO_STATES.includes(activeVideoTask.value.status))
-const isCurrentTurn = computed(() => activeTurn.value?.id === state.currentTurnId)
-const choicesEnabled = computed(
-  () => isCurrentTurn.value && activeVideoTask.value.status === 'succeeded',
-)
+const choicesEnabled = computed(() => activeVideoTask.value.status === 'succeeded')
 const canSend = computed(() => draft.value.trim().length >= 3 && state.phase !== 'story-generating')
-const isMockMode = computed(() => state.providerMode !== 'real')
+const isMockMode = computed(() => (state.videoProviderMode ?? state.providerMode) !== 'real')
 const connectionLabel = computed(() => {
-  if (state.providerMode === 'real') return '服务端 · 真实 API 模式'
-  if (state.providerMode === 'mock') return '服务端 Mock · SQLite 持久化'
+  if (state.providerMode === 'real' && state.videoProviderMode === 'real') {
+    return 'Qwen Real · Wan Real'
+  }
+  if (state.providerMode !== 'local') {
+    return `Qwen ${state.providerMode === 'real' ? 'Real' : 'Mock'} · Wan ${state.videoProviderMode === 'real' ? 'Real' : 'Mock'}`
+  }
   return backendAvailable.value ? '本地 Mock' : '本地 Mock · 后端未连接'
 })
 const previewLabel = computed(() => (isMockMode.value ? 'MOCK PREVIEW' : 'GENERATED VIDEO'))
+const currentBranchName = computed(() =>
+  state.branches?.find((branch) => branch.id === state.currentBranchId)?.name ?? 'Main',
+)
 const elapsedSeconds = computed(() => {
   if (!activeVideoTask.value.startedAt) return 0
   return Math.max(0, Math.floor((nowTick.value - activeVideoTask.value.startedAt) / 1000))
@@ -144,7 +178,6 @@ const videoStatusLabel = computed(() => {
 })
 const primaryInputPlaceholder = computed(() => {
   if (state.phase === 'empty') return '输入你的故事创意…'
-  if (!isCurrentTurn.value) return '返回当前片段后可继续故事…'
   if (!choicesEnabled.value) return '视频完成后可以续写故事…'
   return '或者自由描述故事的下一步…'
 })
@@ -154,6 +187,10 @@ const activeMediaUrl = computed(() => {
   if (!url) return null
   return new URL(url, `${publicConfig.apiBaseUrl}/`).toString()
 })
+function storyPathCoverUrl(turn: StoryTurn) {
+  if (turn.videoTask.coverKind !== 'real' || !turn.videoTask.coverUrl) return null
+  return new URL(turn.videoTask.coverUrl, `${publicConfig.apiBaseUrl}/`).toString()
+}
 const hasPlayableVideo = computed(
   () => Boolean(activeMediaUrl.value && activeVideoTask.value.mediaType?.startsWith('video/')),
 )
@@ -207,25 +244,24 @@ function mapVideoTask(video: VideoTaskResponse): VideoTask {
     updatedAt: video.updated_at ? Date.parse(video.updated_at) : null,
     outcome: 'success',
     videoUrl: video.video_url,
+    coverUrl: video.cover_url,
+    coverKind: video.cover_kind,
     mediaType: video.media_type,
     error: video.error,
   }
 }
 
-function hydrateStory(story: StoryResponse, focusCurrent = true) {
-  const previousActiveId = state.activeTurnId
-  state.storyId = story.id
-  state.currentTurnId = story.current_turn_id
-  state.idea = story.original_idea
-  state.providerMode = story.provider_mode
-  state.turns = story.turns.map((turn, index): StoryTurn => ({
+function mapStoryTurn(turn: StoryResponse['turns'][number], index: number): StoryTurn {
+  return {
     id: turn.id,
     storyId: turn.story_id,
     parentTurnId: turn.parent_turn_id,
     title: turn.title,
     storyText: turn.story_text,
+    savedStoryText: turn.story_text,
     summary: turn.summary,
     videoPrompt: turn.video_prompt,
+    savedVideoPrompt: turn.video_prompt,
     choices: turn.choices.map((choice) => ({
       id: choice.id,
       label: choice.label,
@@ -235,13 +271,39 @@ function hydrateStory(story: StoryResponse, focusCurrent = true) {
     imageVariant: index % 4,
     createdAt: turn.created_at,
     videoTask: mapVideoTask(turn.video),
+    videoHistory: (turn.video_history ?? []).map(mapVideoTask),
+    contentVersionId: turn.content_version_id,
+    contentVersion: turn.content_version,
+    branchStatus: turn.branch_status,
+    staleReasonVersionId: turn.stale_reason_version_id,
+  }
+}
+
+function hydrateStory(story: StoryResponse, focusCurrent = true) {
+  const previousActiveId = state.activeTurnId
+  state.storyId = story.id
+  state.currentTurnId = story.current_turn_id
+  state.currentBranchId = story.current_branch_id ?? null
+  state.idea = story.original_idea
+  state.providerMode = story.provider_mode
+  state.videoProviderMode = story.provider_modes?.video ?? story.provider_mode
+  state.branches = (story.branches ?? []).map((branch) => ({
+    id: branch.id,
+    name: branch.name,
+    forkedFromBranchId: branch.forked_from_branch_id,
+    forkedAtTurnId: branch.forked_at_turn_id,
+    headTurnId: branch.head_turn_id,
+    pathTurnIds: branch.path_turn_ids,
   }))
+  state.turns = story.turns.map(mapStoryTurn)
+  state.treeTurns = (story.tree_turns ?? story.turns).map(mapStoryTurn)
   state.activeTurnId =
     focusCurrent || !state.turns.some((turn) => turn.id === previousActiveId)
       ? story.current_turn_id
       : previousActiveId
   state.phase = 'story-ready'
   state.selectedChoiceId = null
+  storyEditorOpen.value = false
 }
 
 async function submitDraft() {
@@ -253,9 +315,7 @@ async function submitDraft() {
   }
   if (state.phase === 'empty') return startStory(value)
   if (!choicesEnabled.value) {
-    inputError.value = isCurrentTurn.value
-      ? '请先完成当前片段的视频，再决定下一步。'
-      : '请先在下方时间线返回当前故事片段。'
+    inputError.value = '请先完成所选片段的视频，再决定下一步。'
     return
   }
   await continueStory(value, null)
@@ -286,6 +346,7 @@ async function startStory(idea: string) {
     }
     pushMessage('assistant', `第一幕已经展开：${activeTurn.value?.summary}`)
     pushActivity('故事片段已生成', '4 个后续方向已准备好', 'success')
+    currentView.value = 'workspace'
   } catch (error) {
     state.phase = 'empty'
     inputError.value = readableError(error)
@@ -312,7 +373,9 @@ async function continueStory(direction: string, choiceId: string | null, label?:
       const story = await apiClient.choose(
         state.storyId,
         currentTurn.id,
-        choiceId ? { choice_id: choiceId } : { custom_direction: direction },
+        choiceId
+          ? { branch_id: state.currentBranchId ?? undefined, choice_id: choiceId }
+          : { branch_id: state.currentBranchId ?? undefined, custom_direction: direction },
       )
       hydrateStory(story)
     } else {
@@ -334,9 +397,9 @@ async function continueStory(direction: string, choiceId: string | null, label?:
   }
 }
 
-async function startVideoGeneration(confirmSubmissionUnknown = false) {
+async function startVideoGeneration(confirmSubmissionUnknown = false, regenerate = false) {
   const turn = activeTurn.value
-  if (!turn || !isCurrentTurn.value || isVideoBusy.value || turn.videoTask.status === 'succeeded') return
+  if (!turn || isVideoBusy.value || (turn.videoTask.status === 'succeeded' && !regenerate)) return
   const outcome = nextOutcome.value
   nextOutcome.value = 'success'
   turn.videoTask = {
@@ -349,7 +412,7 @@ async function startVideoGeneration(confirmSubmissionUnknown = false) {
   promptEditorOpen.value = false
   pushActivity(
     '视频任务提交中',
-    state.providerMode === 'real' ? 'Wan2.6 · 1280×720 · 5 秒' : 'Mock Wan · 无付费请求',
+    isMockMode.value ? 'Mock Wan · 无付费请求' : 'Wan2.6 · 1280×720 · 5 秒',
     'active',
   )
 
@@ -359,17 +422,35 @@ async function startVideoGeneration(confirmSubmissionUnknown = false) {
   }
 
   try {
-    await apiClient.updateTurn(state.storyId, turn.id, { video_prompt: turn.videoPrompt })
+    if (turn.videoPrompt !== turn.savedVideoPrompt) {
+      const updated = await apiClient.updateTurn(state.storyId, turn.id, {
+        branch_id: state.currentBranchId ?? undefined,
+        video_prompt: turn.videoPrompt,
+      })
+      hydrateStory(updated, false)
+    }
     const response = await apiClient.createVideo(state.storyId, turn.id, {
+      branch_id: state.currentBranchId ?? undefined,
       confirm_submission_unknown: confirmSubmissionUnknown,
-      ...(state.providerMode === 'mock' ? { mock_outcome: outcome } : {}),
+      regenerate,
+      idempotency_key: crypto.randomUUID(),
+      ...(isMockMode.value ? { mock_outcome: outcome } : {}),
     })
-    turn.videoTask = mapVideoTask(response)
+    const targetTurn = state.turns.find((item) => item.id === turn.id)
+    if (targetTurn) {
+      targetTurn.videoTask = mapVideoTask(response)
+      targetTurn.videoHistory = [targetTurn.videoTask, ...(targetTurn.videoHistory ?? [])
+        .filter((item) => item.id !== targetTurn.videoTask.id)]
+    }
     announceVideoStatus('submitting', response.status, response)
   } catch (error) {
     const message = readableError(error)
     try {
-      const persisted = mapVideoTask(await apiClient.getVideo(state.storyId, turn.id))
+      const persisted = mapVideoTask(await apiClient.getVideo(
+        state.storyId,
+        turn.id,
+        state.currentBranchId ?? undefined,
+      ))
       turn.videoTask =
         persisted.status === 'idle'
           ? {
@@ -411,7 +492,11 @@ async function pollBackendTasks() {
     await Promise.all(
       activeTasks.map(async (turn) => {
         const previous = turn.videoTask.status
-        const response = await apiClient.getVideo(state.storyId!, turn.id)
+        const response = await apiClient.getVideo(
+          state.storyId!,
+          turn.id,
+          state.currentBranchId ?? undefined,
+        )
         turn.videoTask = mapVideoTask(response)
         announceVideoStatus(previous, response.status, response)
       }),
@@ -519,8 +604,10 @@ async function toggleFullscreen() {
 
 function resetWorkspace() {
   const mode = state.providerMode
+  const videoMode = state.videoProviderMode
   const fresh = emptyWorkspace()
   fresh.providerMode = mode
+  fresh.videoProviderMode = videoMode
   Object.assign(state, fresh)
   draft.value = ''
   inputError.value = ''
@@ -529,6 +616,259 @@ function resetWorkspace() {
   isPlaying.value = false
   playhead.value = 0
   window.localStorage.removeItem(STORAGE_KEY)
+}
+
+async function loadDrafts(page = draftPage.value) {
+  if (!backendAvailable.value) {
+    drafts.value = []
+    draftTotalPages.value = 0
+    return
+  }
+  draftsLoading.value = true
+  homeError.value = ''
+  try {
+    const result = await apiClient.listStories(page, 9)
+    drafts.value = result.items
+    draftPage.value = result.page
+    draftTotalPages.value = result.total_pages
+  } catch (error) {
+    homeError.value = readableError(error)
+  } finally {
+    draftsLoading.value = false
+  }
+}
+
+async function createFromHome(idea: string) {
+  homeCreating.value = true
+  homeError.value = ''
+  resetWorkspace()
+  try {
+    await startStory(idea)
+  } finally {
+    homeCreating.value = false
+  }
+}
+
+async function openDraft(storyId: string) {
+  if (!backendAvailable.value) return
+  homeError.value = ''
+  try {
+    const story = await apiClient.getStory(storyId)
+    resetWorkspace()
+    hydrateStory(story)
+    currentView.value = 'workspace'
+  } catch (error) {
+    homeError.value = readableError(error)
+  }
+}
+
+async function deleteDraft(draftItem: StoryListItem) {
+  if (!backendAvailable.value || deletingDraftId.value) return
+  if (!window.confirm(`Delete ${draftItem.name} “${draftItem.title}”? This cannot be undone.`)) return
+  deletingDraftId.value = draftItem.id
+  homeError.value = ''
+  try {
+    await apiClient.deleteStory(draftItem.id)
+    if (state.storyId === draftItem.id) resetWorkspace()
+    const nextPage = drafts.value.length === 1 && draftPage.value > 1
+      ? draftPage.value - 1
+      : draftPage.value
+    await loadDrafts(nextPage)
+  } catch (error) {
+    homeError.value = readableError(error)
+  } finally {
+    deletingDraftId.value = null
+  }
+}
+
+function goHome() {
+  currentView.value = 'home'
+  branchDrawerOpen.value = false
+  versionPanelOpen.value = false
+  void loadDrafts()
+}
+
+async function openSettings() {
+  settingsOpen.value = true
+  keyError.value = ''
+  if (!backendAvailable.value) {
+    keyError.value = '后端未连接，无法安全保存临时 Key。'
+    return
+  }
+  try {
+    keyStatus.value = await apiClient.getKeyStatus()
+  } catch (error) {
+    keyError.value = readableError(error)
+  }
+}
+
+async function saveKeys(value: UpdateKeysRequest) {
+  keyBusy.value = true
+  keyError.value = ''
+  try {
+    keyStatus.value = await apiClient.updateKeys(value)
+    state.providerMode = keyStatus.value.qwen.mode
+    state.videoProviderMode = keyStatus.value.wan.mode
+    settingsOpen.value = false
+  } catch (error) {
+    keyError.value = readableError(error)
+  } finally {
+    keyBusy.value = false
+  }
+}
+
+function clearKeys() {
+  void saveKeys({ qwen_api_key: null, wan_api_key: null })
+}
+
+async function switchBranch(branchId: string) {
+  if (!state.storyId || branchId === state.currentBranchId) return
+  try {
+    const story = await apiClient.activateBranch(state.storyId, branchId)
+    hydrateStory(story)
+  } catch (error) {
+    inputError.value = readableError(error)
+  }
+}
+
+async function renameBranch(branchId: string) {
+  if (!state.storyId) return
+  const branch = state.branches?.find((item) => item.id === branchId)
+  const name = window.prompt('分支名称', branch?.name ?? '')?.trim()
+  if (!name || name === branch?.name) return
+  try {
+    hydrateStory(await apiClient.renameBranch(state.storyId, branchId, name), false)
+  } catch (error) {
+    inputError.value = readableError(error)
+  }
+}
+
+async function deleteBranch(branchId: string) {
+  if (!state.storyId) return
+  const branch = state.branches?.find((item) => item.id === branchId)
+  if (!branch?.forkedFromBranchId) return
+  if (!window.confirm(`删除分支“${branch.name}”？该分支专属剧情节点也会被删除。`)) return
+  try {
+    const story = await apiClient.deleteBranch(state.storyId, branchId)
+    hydrateStory(story)
+  } catch (error) {
+    inputError.value = readableError(error)
+  }
+}
+
+async function saveStoryTextVersion() {
+  const turn = activeTurn.value
+  if (!state.storyId || !turn || turn.storyText === turn.savedStoryText) {
+    storyEditorOpen.value = false
+    return
+  }
+  versionBusy.value = true
+  try {
+    const story = await apiClient.updateTurn(state.storyId, turn.id, {
+      branch_id: state.currentBranchId ?? undefined,
+      story_text: turn.storyText,
+    })
+    hydrateStory(story, false)
+    storyEditorOpen.value = false
+  } catch (error) {
+    inputError.value = readableError(error)
+  } finally {
+    versionBusy.value = false
+  }
+}
+
+async function openVersions() {
+  if (!state.storyId || !activeTurn.value) return
+  versionBusy.value = true
+  versionPanelOpen.value = true
+  try {
+    contentVersions.value = await apiClient.listVersions(state.storyId, activeTurn.value.id)
+  } catch (error) {
+    inputError.value = readableError(error)
+  } finally {
+    versionBusy.value = false
+  }
+}
+
+async function selectContentVersion(versionId: string) {
+  if (!state.storyId || !state.currentBranchId || !activeTurn.value) return
+  versionBusy.value = true
+  try {
+    const story = await apiClient.selectVersion(
+      state.storyId,
+      state.currentBranchId,
+      activeTurn.value.id,
+      { content_version_id: versionId },
+    )
+    hydrateStory(story, false)
+  } catch (error) {
+    inputError.value = readableError(error)
+  } finally {
+    versionBusy.value = false
+  }
+}
+
+async function selectVideoVersion(taskId: string) {
+  if (!state.storyId || !state.currentBranchId || !activeTurn.value) return
+  versionBusy.value = true
+  try {
+    const story = await apiClient.selectVersion(
+      state.storyId,
+      state.currentBranchId,
+      activeTurn.value.id,
+      { video_task_id: taskId },
+    )
+    hydrateStory(story, false)
+  } catch (error) {
+    inputError.value = readableError(error)
+  } finally {
+    versionBusy.value = false
+  }
+}
+
+async function regenerateStoryVersion() {
+  if (!state.storyId || !state.currentBranchId || !activeTurn.value || versionBusy.value) return
+  const turnId = activeTurn.value.id
+  versionBusy.value = true
+  inputError.value = ''
+  pushActivity('正在重新生成剧情', '创建当前镜头的新内容版本，不创建分支', 'active')
+  try {
+    const story = await apiClient.regenerateStory(
+      state.storyId,
+      state.currentBranchId,
+      turnId,
+    )
+    hydrateStory(story, false)
+    contentVersions.value = await apiClient.listVersions(state.storyId, turnId)
+    pushActivity('剧情新版本已生成', '旧版本仍可在版本面板中切换', 'success')
+  } catch (error) {
+    inputError.value = readableError(error)
+    pushActivity('剧情重新生成失败', inputError.value, 'danger')
+  } finally {
+    versionBusy.value = false
+  }
+}
+
+function regenerateVideoVersion() {
+  versionPanelOpen.value = false
+  void startVideoGeneration(false, true)
+}
+
+async function confirmStaleTurn() {
+  if (!state.storyId || !state.currentBranchId || !activeTurn.value) return
+  versionBusy.value = true
+  try {
+    hydrateStory(await apiClient.confirmTurn(
+      state.storyId,
+      state.currentBranchId,
+      activeTurn.value.id,
+    ), false)
+    versionPanelOpen.value = false
+  } catch (error) {
+    inputError.value = readableError(error)
+  } finally {
+    versionBusy.value = false
+  }
 }
 
 function selectTurn(turnId: string) {
@@ -554,6 +894,7 @@ async function connectBackend() {
     const health = await apiClient.health()
     backendAvailable.value = true
     state.providerMode = health.provider_mode
+    state.videoProviderMode = health.provider_modes?.video ?? health.provider_mode
     pushActivity(
       health.provider_mode === 'real' ? '真实 Provider 已启用' : '服务端 Mock 已连接',
       health.provider_mode === 'real' ? '模型调用可能产生费用' : 'SQLite 持久化，不会调用付费 API',
@@ -579,6 +920,7 @@ async function connectBackend() {
 onMounted(async () => {
   document.addEventListener('fullscreenchange', syncFullscreenState)
   await connectBackend()
+  await loadDrafts()
   taskTimer = window.setInterval(() => {
     nowTick.value = Date.now()
     if (backendAvailable.value) void pollBackendTasks()
@@ -605,20 +947,45 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <HomePage
+    v-if="currentView === 'home'"
+    :drafts="drafts"
+    :loading="draftsLoading"
+    :creating="homeCreating"
+    :error="homeError"
+    :page="draftPage"
+    :total-pages="draftTotalPages"
+    :deleting-draft-id="deletingDraftId"
+    @create="createFromHome"
+    @open="openDraft"
+    @remove="deleteDraft"
+    @settings="openSettings"
+    @page="loadDrafts"
+  />
+  <div v-else class="app-shell">
     <header class="topbar">
-      <button class="brand" aria-label="SceneFork 首页" @click="resetWorkspace">
+      <button class="icon-button home-button" aria-label="返回主页" title="返回主页" @click="goHome">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m3.5 11.5 8.5-7.5 8.5 7.5" />
+          <path d="M5.5 10.5V20h13v-9.5M9.5 20v-6h5v6" />
+        </svg>
+      </button>
+      <button class="brand" aria-label="SceneFork 首页" @click="goHome">
         <span>Scene</span><strong>Fork</strong>
         <span class="phase-pill">{{ state.providerMode === 'real' ? 'LIVE' : 'MOCK' }}</span>
       </button>
-      <button class="icon-button settings-button" aria-label="打开演示设置" @click="settingsOpen = true">
+      <button class="icon-button settings-button" aria-label="API Key 设置" @click="openSettings">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 8.75A3.25 3.25 0 1 0 12 15.25 3.25 3.25 0 0 0 12 8.75Z" />
           <path d="M19.2 13.1c.05-.36.08-.72.08-1.1s-.03-.74-.08-1.1l2-1.56-1.9-3.28-2.46.99a8.3 8.3 0 0 0-1.9-1.1L14.57 3h-3.8l-.38 2.95a8.3 8.3 0 0 0-1.9 1.1l-2.46-.99-1.9 3.28 2 1.56A7.5 7.5 0 0 0 6.05 12c0 .38.03.74.08 1.1l-2 1.56 1.9 3.28 2.46-.99c.58.46 1.22.83 1.9 1.1l.38 2.95h3.8l.38-2.95a8.3 8.3 0 0 0 1.9-1.1l2.46.99 1.9-3.28-2.01-1.56Z" />
         </svg>
       </button>
+      <button class="branch-switch" aria-label="剧情树与分支" title="剧情树与分支" @click="branchDrawerOpen = true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v5m0 0v6m0-6h6a4 4 0 0 1 4 4v2M7 15v5m10-5v5M4 4h6v4H4V4Zm0 12h6v4H4v-4Zm10 0h6v4h-6v-4Z" /></svg>
+        <span>{{ currentBranchName }}</span>
+      </button>
       <div class="header-spacer"></div>
-      <div class="connection-badge" :class="{ live: state.providerMode === 'real' }"><span></span> {{ connectionLabel }}</div>
+      <div class="connection-badge" :class="{ live: state.providerMode === 'real' || state.videoProviderMode === 'real' }"><span></span> {{ connectionLabel }}</div>
     </header>
 
     <main class="workspace">
@@ -669,7 +1036,7 @@ onBeforeUnmount(() => {
 
           <div v-else-if="state.phase === 'story-generating'" class="stage-center generation-state">
             <span class="spinner large"></span>
-            <p class="eyebrow">{{ isMockMode ? 'MOCK STORY ENGINE' : 'QWEN 3.8 FLASH' }}</p>
+            <p class="eyebrow">{{ isMockMode ? 'MOCK STORY ENGINE' : 'QWEN 3.7 FLASH' }}</p>
             <h2>{{ activeTurn ? '正在续写下一幕' : '正在构建故事世界' }}</h2>
             <p>整理角色、场景与四个不同的剧情方向…</p>
           </div>
@@ -678,9 +1045,9 @@ onBeforeUnmount(() => {
             <p class="eyebrow">故事片段已就绪</p>
             <h2>{{ activeTurn?.title }}</h2>
             <p>{{ activeTurn?.summary }}</p>
-            <button class="primary-button generate-button" :disabled="!isCurrentTurn" @click="startVideoGeneration()">
+            <button class="primary-button generate-button" @click="startVideoGeneration()">
               <svg viewBox="0 0 24 24"><path d="m10 8 6 4-6 4V8Z" /><path d="M4.75 5.75A2.75 2.75 0 0 1 7.5 3h9A2.75 2.75 0 0 1 19.25 5.75v12.5A2.75 2.75 0 0 1 16.5 21h-9a2.75 2.75 0 0 1-2.75-2.75V5.75Z" /></svg>
-              {{ !isCurrentTurn ? '请返回当前片段' : isMockMode ? '生成 Mock 视频' : '生成视频' }}
+              {{ isMockMode ? '生成 Mock 视频' : '生成视频' }}
             </button>
             <button class="text-button" @click="promptEditorOpen = true">先编辑视频提示词</button>
           </div>
@@ -786,8 +1153,21 @@ onBeforeUnmount(() => {
               :class="{ active: turn.id === state.activeTurnId }"
               @click="selectTurn(turn.id)"
             >
-              <span class="thumb" :class="`variant-${turn.imageVariant}`">
+              <span
+                class="thumb"
+                :class="[
+                  `variant-${turn.imageVariant}`,
+                  { 'real-cover': Boolean(storyPathCoverUrl(turn)) },
+                ]"
+              >
+                <img
+                  v-if="storyPathCoverUrl(turn)"
+                  class="turn-cover"
+                  :src="storyPathCoverUrl(turn)!"
+                  :alt="`${turn.title} 视频首帧`"
+                />
                 <span class="number-badge">{{ index + 1 }}</span>
+                <span v-if="turn.branchStatus === 'stale'" class="stale-badge" title="上游剧情已变化，可能不连贯">!</span>
                 <span class="duration-badge">0:{{ String(turn.duration).padStart(2, '0') }}</span>
               </span>
               <span class="card-title">{{ turn.title }}</span>
@@ -849,15 +1229,27 @@ onBeforeUnmount(() => {
             <div class="story-card-head">
               <span>当前片段</span><strong>{{ activeTurn.title }}</strong>
             </div>
-            <p>{{ activeTurn.storyText }}</p>
+            <div v-if="storyEditorOpen" class="prompt-editor story-text-editor">
+              <textarea v-model="activeTurn.storyText" :disabled="versionBusy" rows="8"></textarea>
+              <small>保存会建立新的不可变内容版本；当前分支的真正下游节点会标记为“可能不连贯”。</small>
+              <div class="editor-actions">
+                <button class="text-button" @click="activeTurn.storyText = activeTurn.savedStoryText ?? activeTurn.storyText; storyEditorOpen = false">取消</button>
+                <button class="secondary-button" :disabled="versionBusy || activeTurn.storyText.trim().length < 20" @click="saveStoryTextVersion">保存为新版本</button>
+              </div>
+            </div>
+            <template v-else>
+              <p>{{ activeTurn.storyText }}</p>
+              <button class="text-button inline-edit" @click="storyEditorOpen = true">编辑剧情文本</button>
+            </template>
             <button class="prompt-toggle" @click="promptEditorOpen = !promptEditorOpen">
               <span>视频提示词</span>
               <svg viewBox="0 0 24 24" :class="{ rotated: promptEditorOpen }"><path d="m8 10 4 4 4-4" /></svg>
             </button>
             <div v-if="promptEditorOpen" class="prompt-editor">
-              <textarea v-model="activeTurn.videoPrompt" :disabled="!isCurrentTurn || activeVideoTask.status !== 'idle'" rows="5"></textarea>
+              <textarea v-model="activeTurn.videoPrompt" :disabled="isVideoBusy" rows="5"></textarea>
               <small>仅当前片段使用；四个未选分支不会混入提示词。</small>
             </div>
+            <button class="text-button" @click="openVersions">查看内容与视频版本</button>
           </section>
 
           <section v-if="activeTurn && choicesEnabled" class="choice-panel">
@@ -907,7 +1299,7 @@ onBeforeUnmount(() => {
               <button type="button" class="tool-button" disabled title="阶段 A 暂不支持上传参考图" aria-label="上传参考图（未实现）">
                 <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5Zm0 11 5-5 4 4 2-2 5 5M15.5 9A1.5 1.5 0 1 0 15.5 6a1.5 1.5 0 0 0 0 3Z" /></svg>
               </button>
-              <button type="button" class="tool-button" @click="settingsOpen = true" aria-label="生成设置">
+              <button type="button" class="tool-button" @click="openSettings" aria-label="API Key 设置">
                 <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2m4 0h10M4 12h4m4 0h8M14 5v4M8 15v4m2-9v4" /></svg>
               </button>
               <span class="shortcut">Ctrl + Enter</span>
@@ -920,38 +1312,38 @@ onBeforeUnmount(() => {
       </aside>
     </main>
 
-    <transition name="modal">
-      <div v-if="settingsOpen" class="modal-backdrop" @mousedown.self="settingsOpen = false">
-        <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <div class="modal-header">
-            <div><span class="section-kicker">PHASE B</span><h2 id="settings-title">生成设置</h2></div>
-            <button class="icon-button" aria-label="关闭" @click="settingsOpen = false">
-              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
-            </button>
-          </div>
-          <p class="modal-intro">{{ isMockMode ? '选择下一次视频任务的演示结果。Mock 模式不会产生模型费用。' : '当前已启用真实 Provider。生成视频可能产生模型费用，任务提交后不会自动重复创建。' }}</p>
-          <fieldset v-if="isMockMode">
-            <legend>下一次视频生成</legend>
-            <label :class="{ selected: nextOutcome === 'success' }">
-              <input v-model="nextOutcome" value="success" type="radio" />
-              <span><strong>成功</strong><small>依次演示提交、排队、生成、保存与播放</small></span>
-            </label>
-            <label :class="{ selected: nextOutcome === 'failure' }">
-              <input v-model="nextOutcome" value="failure" type="radio" />
-              <span><strong>失败</strong><small>演示明确失败后的手动重试</small></span>
-            </label>
-            <label :class="{ selected: nextOutcome === 'unknown' }">
-              <input v-model="nextOutcome" value="unknown" type="radio" />
-              <span><strong>结果未知</strong><small>演示禁止自动重试与人工确认</small></span>
-            </label>
-          </fieldset>
-          <div class="modal-note"><strong>刷新恢复</strong><span>{{ backendAvailable ? '任务保存在 SQLite 中；刷新只会恢复轮询，不会重新提交。' : '本地 Mock 状态保存在当前浏览器中。' }}</span></div>
-          <div class="modal-footer">
-            <button class="danger-text-button" @click="resetWorkspace">开始新故事</button>
-            <button class="primary-button" @click="settingsOpen = false">完成</button>
-          </div>
-        </section>
-      </div>
-    </transition>
   </div>
+  <KeySettingsModal
+    :open="settingsOpen"
+    :status="keyStatus"
+    :busy="keyBusy"
+    :error="keyError"
+    @close="settingsOpen = false"
+    @save="saveKeys"
+    @clear="clearKeys"
+  />
+  <BranchDrawer
+    :open="branchDrawerOpen"
+    :branches="state.branches ?? []"
+    :turns="state.treeTurns ?? state.turns"
+    :current-branch-id="state.currentBranchId ?? null"
+    :active-turn-id="state.activeTurnId"
+    @close="branchDrawerOpen = false"
+    @branch="switchBranch"
+    @turn="selectTurn"
+    @rename="renameBranch"
+    @remove="deleteBranch"
+  />
+  <VersionPanel
+    :open="versionPanelOpen"
+    :turn="activeTurn"
+    :versions="contentVersions"
+    :busy="versionBusy"
+    @close="versionPanelOpen = false"
+    @content="selectContentVersion"
+    @video="selectVideoVersion"
+    @regenerate-story="regenerateStoryVersion"
+    @regenerate-video="regenerateVideoVersion"
+    @confirm="confirmStaleTurn"
+  />
 </template>

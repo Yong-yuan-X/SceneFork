@@ -9,10 +9,33 @@ export const stories = sqliteTable(
     charactersJson: text('characters_json').notNull(),
     sceneJson: text('scene_json').notNull(),
     currentTurnId: text('current_turn_id').notNull(),
+    activeBranchId: text('active_branch_id'),
+    draftNumber: integer('draft_number'),
+    coverPath: text('cover_path'),
+    coverKind: text('cover_kind', { enum: ['real', 'mock', 'placeholder'] })
+      .notNull()
+      .default('placeholder'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
   (table) => [index('stories_current_turn_idx').on(table.currentTurnId)],
+)
+
+export const storyBranches = sqliteTable(
+  'story_branches',
+  {
+    id: text('id').primaryKey(),
+    storyId: text('story_id')
+      .notNull()
+      .references(() => stories.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    forkedFromBranchId: text('forked_from_branch_id'),
+    forkedAtTurnId: text('forked_at_turn_id'),
+    headTurnId: text('head_turn_id').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [index('story_branches_story_idx').on(table.storyId)],
 )
 
 export const storyTurns = sqliteTable(
@@ -56,16 +79,73 @@ export const selections = sqliteTable(
     turnId: text('turn_id')
       .notNull()
       .references(() => storyTurns.id, { onDelete: 'cascade' }),
+    branchId: text('branch_id')
+      .notNull()
+      .references(() => storyBranches.id, { onDelete: 'cascade' }),
     userDirection: text('user_direction').notNull(),
     source: text('source', { enum: ['preset', 'custom'] }).notNull(),
     choiceId: text('choice_id'),
+    intentKey: text('intent_key').notNull(),
     nextTurnId: text('next_turn_id'),
     status: text('status', { enum: ['generating', 'complete', 'failed'] }).notNull(),
     error: text('error'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
-  (table) => [uniqueIndex('selections_turn_unique').on(table.turnId)],
+  (table) => [
+    uniqueIndex('selections_branch_turn_intent_unique').on(
+      table.branchId,
+      table.turnId,
+      table.intentKey,
+    ),
+    index('selections_turn_idx').on(table.turnId),
+    index('selections_branch_idx').on(table.branchId),
+  ],
+)
+
+export const turnContentVersions = sqliteTable(
+  'turn_content_versions',
+  {
+    id: text('id').primaryKey(),
+    turnId: text('turn_id')
+      .notNull()
+      .references(() => storyTurns.id, { onDelete: 'cascade' }),
+    version: integer('version').notNull(),
+    title: text('title').notNull(),
+    storyText: text('story_text').notNull(),
+    summary: text('summary').notNull(),
+    videoPrompt: text('video_prompt').notNull(),
+    charactersJson: text('characters_json').notNull(),
+    sceneJson: text('scene_json').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('turn_content_versions_turn_version_unique').on(table.turnId, table.version),
+    index('turn_content_versions_turn_idx').on(table.turnId),
+  ],
+)
+
+export const branchTurnOverrides = sqliteTable(
+  'branch_turn_overrides',
+  {
+    branchId: text('branch_id')
+      .notNull()
+      .references(() => storyBranches.id, { onDelete: 'cascade' }),
+    turnId: text('turn_id')
+      .notNull()
+      .references(() => storyTurns.id, { onDelete: 'cascade' }),
+    contentVersionId: text('content_version_id')
+      .notNull()
+      .references(() => turnContentVersions.id),
+    selectedVideoTaskId: text('selected_video_task_id'),
+    status: text('status', { enum: ['normal', 'stale'] }).notNull().default('normal'),
+    triggeredByVersionId: text('triggered_by_version_id'),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    uniqueIndex('branch_turn_overrides_pk').on(table.branchId, table.turnId),
+    index('branch_turn_overrides_turn_idx').on(table.turnId),
+  ],
 )
 
 export const videoTasks = sqliteTable(
@@ -96,8 +176,14 @@ export const videoTasks = sqliteTable(
     error: text('error'),
     temporaryVideoUrl: text('temporary_video_url'),
     localPath: text('local_path'),
+    coverPath: text('cover_path'),
     mediaType: text('media_type'),
     mockOutcome: text('mock_outcome', { enum: ['success', 'failure', 'unknown'] }),
+    contentVersionId: text('content_version_id'),
+    promptSnapshot: text('prompt_snapshot'),
+    credentialFingerprint: text('credential_fingerprint'),
+    credentialSource: text('credential_source'),
+    providerMode: text('provider_mode', { enum: ['mock', 'real'] }).notNull().default('mock'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
     completedAt: text('completed_at'),
@@ -111,6 +197,9 @@ export const videoTasks = sqliteTable(
 
 export type StoryRow = typeof stories.$inferSelect
 export type StoryTurnRow = typeof storyTurns.$inferSelect
+export type StoryBranchRow = typeof storyBranches.$inferSelect
 export type ChoiceRow = typeof choices.$inferSelect
 export type SelectionRow = typeof selections.$inferSelect
+export type TurnContentVersionRow = typeof turnContentVersions.$inferSelect
+export type BranchTurnOverrideRow = typeof branchTurnOverrides.$inferSelect
 export type VideoTaskRow = typeof videoTasks.$inferSelect

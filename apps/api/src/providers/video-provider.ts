@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { AppConfig } from '../../../../config.js'
+import type { CredentialService } from '../services/credential-service.js'
 import { ProviderError } from '../errors.js'
 
 export type ProviderVideoStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED' | 'UNKNOWN'
@@ -60,7 +61,10 @@ export class MockVideoProvider implements VideoProvider {
 }
 
 export class WanVideoProvider implements VideoProvider {
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly apiKey: () => string = () => config.wanApiKey || config.dashscopeApiKey,
+  ) {}
 
   async submit(prompt: string, options: { requestId: string }): Promise<VideoSubmission> {
     const controller = new AbortController()
@@ -72,7 +76,7 @@ export class WanVideoProvider implements VideoProvider {
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${this.config.dashscopeApiKey}`,
+            Authorization: `Bearer ${this.apiKey()}`,
             'Content-Type': 'application/json',
             'X-DashScope-Async': 'enable',
             'X-DashScope-Request-Id': options.requestId,
@@ -122,7 +126,7 @@ export class WanVideoProvider implements VideoProvider {
     const startedAt = Date.now()
     try {
       const response = await fetch(`${this.config.wanBaseUrl}/tasks/${encodeURIComponent(taskId)}`, {
-        headers: { Authorization: `Bearer ${this.config.dashscopeApiKey}` },
+        headers: { Authorization: `Bearer ${this.apiKey()}` },
         signal: controller.signal,
       })
       const body = PollResponseSchema.parse(await response.json())
@@ -144,6 +148,27 @@ export class WanVideoProvider implements VideoProvider {
     } finally {
       clearTimeout(timeout)
     }
+  }
+}
+
+export class RuntimeVideoProvider implements VideoProvider {
+  private readonly mock = new MockVideoProvider()
+  private readonly real: WanVideoProvider
+
+  constructor(config: AppConfig, private readonly credentials: CredentialService) {
+    this.real = new WanVideoProvider(config, () => this.credentials.get('wan').key)
+  }
+
+  submit(prompt: string, options: { requestId: string; mockOutcome?: 'success' | 'failure' | 'unknown' }) {
+    return this.current().submit(prompt, options)
+  }
+
+  poll(taskId: string) {
+    return (taskId.startsWith('mock-') ? this.mock : this.real).poll(taskId)
+  }
+
+  private current() {
+    return this.credentials.get('wan').mode === 'real' ? this.real : this.mock
   }
 }
 
