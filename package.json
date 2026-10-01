@@ -11,6 +11,7 @@
     "dev:api": "npm run dev --workspace @scenefork/api",
     "dev:web": "npm run dev --workspace @scenefork/web",
     "build": "npm run build --workspace @scenefork/shared && npm run build --workspace @scenefork/api && npm run build --workspace @scenefork/web",
+    "smoke:api": "npm run smoke --workspace @scenefork/api",
     "typecheck": "npm run typecheck --workspace @scenefork/shared && npm run typecheck --workspace @scenefork/api && npm run typecheck --workspace @scenefork/web",
     "test": "npm run test --workspace @scenefork/api && npm run test --workspace @scenefork/web"
   },
