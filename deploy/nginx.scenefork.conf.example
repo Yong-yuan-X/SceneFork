@@ -1,0 +1,55 @@
+# Replace /opt/scenefork if the repository is installed elsewhere.
+# This server is intentionally reachable only from the local machine. cloudflared
+# connects to 127.0.0.1:8080 and is the only public entry point.
+server {
+    listen 127.0.0.1:8080;
+    server_name _;
+
+    root /opt/scenefork/apps/web/dist;
+    index index.html;
+    autoindex off;
+    server_tokens off;
+
+    # Never serve hidden files or local persistence if they are copied under dist
+    # by mistake. The configured root already excludes the repository itself.
+    location ~ (^|/)\. {
+        return 404;
+    }
+    location ~* \.(?:db|sqlite|sqlite3|env)$ {
+        return 404;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+
+        # Overwrite any client value. Settings accepts an Origin-less request only
+        # when this marker and X-Forwarded-Host match the configured WEB_ORIGIN.
+        proxy_set_header X-SceneFork-Proxy nginx;
+    }
+
+    location /media/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+
+        # Preserve byte-range requests so seeking in generated videos works.
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_force_ranges on;
+        proxy_buffering off;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

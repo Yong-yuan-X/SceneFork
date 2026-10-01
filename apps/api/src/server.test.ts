@@ -64,6 +64,42 @@ test('CORS permits the browser PATCH used before video submission', async () => 
   }
 })
 
+test('CORS permits the configured HTTPS origin and omits access for other origins', async () => {
+  const config: AppConfig = {
+    ...testConfig(':memory:', 1),
+    nodeEnv: 'production',
+    webOrigin: 'https://recruit-demo.trycloudflare.com',
+  }
+  const server = await buildServer({ config, startWorker: false })
+  try {
+    const allowed = await server.app.inject({
+      method: 'OPTIONS',
+      url: '/api/health',
+      headers: {
+        origin: config.webOrigin!,
+        'access-control-request-method': 'GET',
+      },
+    })
+    assert.equal(allowed.statusCode, 204)
+    assert.equal(allowed.headers['access-control-allow-origin'], config.webOrigin)
+
+    const rejected = await server.app.inject({
+      method: 'OPTIONS',
+      url: '/api/health',
+      headers: {
+        origin: 'https://unconfigured.example',
+        'access-control-request-method': 'GET',
+      },
+    })
+    assert.notEqual(
+      rejected.headers['access-control-allow-origin'],
+      'https://unconfigured.example',
+    )
+  } finally {
+    await server.app.close()
+  }
+})
+
 test('API persists stories, protects concurrent video submits, and normalizes preset continuation', async () => {
   const provider = new ControlledVideoProvider()
   const config = testConfig(':memory:', 1)
@@ -412,6 +448,106 @@ test('temporary model keys are protected, redacted, independent, and cleared on 
     assert.equal(status.json().wan.temporary, false)
   } finally {
     await restarted.app.close()
+  }
+})
+
+test('settings accepts an Origin-less same-origin request only through the configured nginx proxy', async () => {
+  const config: AppConfig = {
+    ...testConfig(':memory:', 1),
+    nodeEnv: 'production',
+    webOrigin: 'https://recruit-demo.trycloudflare.com',
+  }
+  const server = await buildServer({ config, startWorker: false })
+  const sameOriginHeaders = {
+    'x-scenefork-settings': '1',
+    'x-scenefork-proxy': 'nginx',
+    'x-forwarded-host': 'recruit-demo.trycloudflare.com',
+  }
+  try {
+    const status = await server.app.inject({
+      method: 'GET',
+      url: '/api/settings/keys',
+      headers: sameOriginHeaders,
+    })
+    assert.equal(status.statusCode, 200)
+
+    const updated = await server.app.inject({
+      method: 'PUT',
+      url: '/api/settings/keys',
+      headers: sameOriginHeaders,
+      payload: { qwen_api_key: 'sk-same-origin-test-key' },
+    })
+    assert.equal(updated.statusCode, 200)
+    assert.doesNotMatch(updated.body, /sk-same-origin-test-key/)
+
+    const direct = await server.app.inject({
+      method: 'GET',
+      url: '/api/settings/keys',
+      headers: { 'x-scenefork-settings': '1' },
+    })
+    assert.equal(direct.statusCode, 403)
+
+    const wrongHost = await server.app.inject({
+      method: 'GET',
+      url: '/api/settings/keys',
+      headers: { ...sameOriginHeaders, 'x-forwarded-host': 'other.trycloudflare.com' },
+    })
+    assert.equal(wrongHost.statusCode, 403)
+
+    const crossOrigin = await server.app.inject({
+      method: 'GET',
+      url: '/api/settings/keys',
+      headers: { ...sameOriginHeaders, origin: 'https://unconfigured.example' },
+    })
+    assert.equal(crossOrigin.statusCode, 403)
+  } finally {
+    await server.app.close()
+  }
+})
+
+test('temporary API key values never enter responses, logs, or SQLite files', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scenefork-key-storage-'))
+  const databasePath = path.join(directory, 'keys.db')
+  const config: AppConfig = {
+    ...testConfig(databasePath, 1),
+    providerMode: 'real',
+    qwenProviderMode: 'real',
+    wanProviderMode: 'real',
+    qwenApiKey: '',
+    wanApiKey: '',
+    dashscopeApiKey: '',
+    webOrigin: 'http://127.0.0.1:5173',
+    qwenBaseUrl: 'https://example.test/compatible-mode/v1',
+    wanBaseUrl: 'https://example.test/api/v1',
+  }
+  const server = await buildServer({ config, startWorker: false })
+  const headers = { origin: config.webOrigin!, 'x-scenefork-settings': '1' }
+  const qwenKey = 'sk-qwen-storage-test-key'
+  const wanKey = 'sk-wan-storage-test-key'
+  const logLines: string[] = []
+  const originalInfo = console.info
+  console.info = (...values: unknown[]) => {
+    logLines.push(values.map(String).join(' '))
+  }
+  try {
+    const response = await server.app.inject({
+      method: 'PUT',
+      url: '/api/settings/keys',
+      headers,
+      payload: { qwen_api_key: qwenKey, wan_api_key: wanKey },
+    })
+    assert.equal(response.statusCode, 200)
+    assert.doesNotMatch(response.body, new RegExp(`${qwenKey}|${wanKey}`))
+  } finally {
+    console.info = originalInfo
+    await server.app.close()
+  }
+
+  assert.doesNotMatch(logLines.join('\n'), new RegExp(`${qwenKey}|${wanKey}`))
+  for (const filename of fs.readdirSync(directory)) {
+    const bytes = fs.readFileSync(path.join(directory, filename))
+    assert.equal(bytes.includes(Buffer.from(qwenKey)), false)
+    assert.equal(bytes.includes(Buffer.from(wanKey)), false)
   }
 })
 

@@ -1,0 +1,21 @@
+[Unit]
+Description=SceneFork Fastify API
+After=network.target
+
+[Service]
+Type=simple
+User=scenefork
+Group=scenefork
+WorkingDirectory=/opt/scenefork
+Environment=NODE_ENV=production
+Environment=API_HOST=127.0.0.1
+Environment=API_PORT=3000
+ExecStart=/usr/bin/node /opt/scenefork/apps/api/dist/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

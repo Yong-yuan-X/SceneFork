@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { StoryListItem } from '@scenefork/shared'
 import { computed, ref } from 'vue'
-import { publicConfig } from '../config'
+import { backendUrl } from '../config'
 
 const props = defineProps<{
   drafts: StoryListItem[]
@@ -35,7 +35,7 @@ function submit() {
 
 function coverUrl(draft: StoryListItem) {
   if (!draft.cover_url || draft.cover_kind !== 'real') return null
-  return new URL(draft.cover_url, `${publicConfig.apiBaseUrl}/`).toString()
+  return backendUrl(draft.cover_url)
 }
 
 function toggleDraftMenu(storyId: string) {

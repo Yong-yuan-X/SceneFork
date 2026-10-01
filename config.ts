@@ -9,6 +9,8 @@ loadDotEnv({ path: path.join(projectRoot, '.env'), quiet: true })
 const positiveInteger = (fallback: number) =>
   z.coerce.number().int().positive().default(fallback)
 
+const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
 const environmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -48,14 +50,39 @@ const environmentSchema = z
       context.addIssue({
         code: 'custom',
         path: ['WEB_ORIGIN'],
-        message: 'WEB_ORIGIN must be a valid local URL',
+        message: 'WEB_ORIGIN must be a valid URL origin',
       })
-    } else if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(new URL(environment.WEB_ORIGIN).hostname)) {
-      context.addIssue({
-        code: 'custom',
-        path: ['WEB_ORIGIN'],
-        message: 'WEB_ORIGIN must point to the local machine',
-      })
+    } else {
+      const webOrigin = new URL(environment.WEB_ORIGIN)
+      const isLoopback = loopbackHosts.has(webOrigin.hostname)
+      const isOriginOnly =
+        webOrigin.pathname === '/' &&
+        !webOrigin.search &&
+        !webOrigin.hash &&
+        !webOrigin.username &&
+        !webOrigin.password
+      if (!isOriginOnly) {
+        context.addIssue({
+          code: 'custom',
+          path: ['WEB_ORIGIN'],
+          message: 'WEB_ORIGIN must contain only scheme, hostname, and optional port',
+        })
+      }
+      if (isLoopback) {
+        if (webOrigin.protocol !== 'http:' && webOrigin.protocol !== 'https:') {
+          context.addIssue({
+            code: 'custom',
+            path: ['WEB_ORIGIN'],
+            message: 'Loopback WEB_ORIGIN must use HTTP or HTTPS',
+          })
+        }
+      } else if (webOrigin.protocol !== 'https:') {
+        context.addIssue({
+          code: 'custom',
+          path: ['WEB_ORIGIN'],
+          message: 'Non-loopback WEB_ORIGIN must use HTTPS',
+        })
+      }
     }
     const qwenMode = environment.QWEN_PROVIDER_MODE ?? environment.SCENEFORK_PROVIDER_MODE
     const wanMode = environment.WAN_PROVIDER_MODE ?? environment.SCENEFORK_PROVIDER_MODE
@@ -170,7 +197,7 @@ export function readConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     wanApiKey: parsed.WAN_API_KEY,
     qwenProviderMode: parsed.QWEN_PROVIDER_MODE ?? parsed.SCENEFORK_PROVIDER_MODE,
     wanProviderMode: parsed.WAN_PROVIDER_MODE ?? parsed.SCENEFORK_PROVIDER_MODE,
-    webOrigin: parsed.WEB_ORIGIN.replace(/\/$/, ''),
+    webOrigin: new URL(parsed.WEB_ORIGIN).origin,
     qwenModel: parsed.QWEN_MODEL,
     wanModel: parsed.WAN_MODEL,
     qwenBaseUrl: parsed.QWEN_BASE_URL.replace(/\/$/, ''),

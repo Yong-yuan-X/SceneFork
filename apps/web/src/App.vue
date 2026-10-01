@@ -8,7 +8,7 @@ import type {
   VideoTaskResponse,
 } from '@scenefork/shared'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { publicConfig } from './config'
+import { backendUrl, publicConfig } from './config'
 import {
   createContinuationTurn,
   createIdleVideoTask,
@@ -185,11 +185,11 @@ const formattedPlayhead = computed(() => `0:${String(Math.floor(playhead.value))
 const activeMediaUrl = computed(() => {
   const url = activeVideoTask.value.videoUrl
   if (!url) return null
-  return new URL(url, `${publicConfig.apiBaseUrl}/`).toString()
+  return backendUrl(url)
 })
 function storyPathCoverUrl(turn: StoryTurn) {
   if (turn.videoTask.coverKind !== 'real' || !turn.videoTask.coverUrl) return null
-  return new URL(turn.videoTask.coverUrl, `${publicConfig.apiBaseUrl}/`).toString()
+  return backendUrl(turn.videoTask.coverUrl)
 }
 const hasPlayableVideo = computed(
   () => Boolean(activeMediaUrl.value && activeVideoTask.value.mediaType?.startsWith('video/')),

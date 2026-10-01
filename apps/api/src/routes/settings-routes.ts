@@ -12,11 +12,14 @@ export function registerSettingsRoutes(
   repository: Repository,
 ) {
   const protect = async (request: FastifyRequest) => {
-    const origin = request.headers.origin
+    const origin = firstHeader(request.headers.origin)
     const expectedOrigin = config.webOrigin ?? 'http://127.0.0.1:5173'
-    if (origin !== expectedOrigin || request.headers['x-scenefork-settings'] !== '1') {
+    const hasSettingsHeader = firstHeader(request.headers['x-scenefork-settings']) === '1'
+    const originAllowed = origin === expectedOrigin
+    const sameOriginProxyAllowed = !origin && isSameOriginProxyRequest(request, expectedOrigin)
+    if (!hasSettingsHeader || (!originAllowed && !sameOriginProxyAllowed)) {
       throw new AppError(
-        'Settings access is restricted to the local SceneFork UI',
+        'Settings access is restricted to the configured SceneFork UI',
         403,
         'SETTINGS_ACCESS_DENIED',
       )
@@ -31,4 +34,15 @@ export function registerSettingsRoutes(
     console.info(`[settings_route] Temporary API key overrides updated resumed_tasks=${resumed}`)
     return status
   })
+}
+
+function isSameOriginProxyRequest(request: FastifyRequest, expectedOrigin: string): boolean {
+  const proxyMarker = firstHeader(request.headers['x-scenefork-proxy'])
+  const forwardedHost = firstHeader(request.headers['x-forwarded-host'])
+  if (proxyMarker !== 'nginx' || !forwardedHost) return false
+  return forwardedHost.trim().toLowerCase() === new URL(expectedOrigin).host.toLowerCase()
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value
 }
